@@ -16,6 +16,11 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
+try:
+    from PIL import Image, ImageEnhance, ImageOps
+except ImportError:  # Local runs can still use the basic OCR path.
+    Image = None
+
 
 LOG = logging.getLogger("moviebot")
 API_ROOT = "https://api.telegram.org/bot{token}"
@@ -28,6 +33,14 @@ def clean_title(line: str) -> str | None:
         return None
     if re.search(r"https?://|www\.|@\w+|\.(com|net|org)\b", line, re.I):
         return None
+    lower = line.casefold()
+    if any(marker in lower for marker in (
+        "directed by", "must-watch", "watchlist", "add comment", "follow",
+        "save this list", "cinephile", "like", "comment", "share", "repost",
+    )):
+        return None
+    if "=" in line or re.search(r"\b\d[\d,.]*\b", line) and len(line.split()) <= 3:
+        return None
     if re.fullmatch(r"[\d\W_]+", line) or re.fullmatch(r"[^A-Za-z]+", line):
         return None
     noise = {
@@ -35,7 +48,7 @@ def clean_title(line: str) -> str | None:
         "trailer", "netflix", "hulu", "prime video", "disney+", "home",
         "search", "movies", "movie", "series", "tv", "originals",
     }
-    if line.casefold() in noise:
+    if lower in noise:
         return None
     # OCR often leaves an isolated rating, year, or button label behind.
     if re.fullmatch(r"(?:19|20)\d{2}", line) or re.fullmatch(r"\d+(?:\.\d+)?/10", line):
@@ -192,14 +205,36 @@ def photo_file_id(message: dict) -> str | None:
 
 
 def ocr(path: str) -> str:
-    """Run the system tesseract binary; no Python OCR package is required."""
-    completed = subprocess.run(
-        [os.getenv("TESSERACT_BIN", "tesseract"), path, "stdout", "--psm", "6"],
-        capture_output=True, text=True, timeout=45, check=False,
-    )
-    if completed.returncode:
-        raise RuntimeError(completed.stderr.strip() or "OCR failed")
-    return completed.stdout
+    """Run Tesseract on the full image and enhanced overlapping crops."""
+    sources = [(path, "6"), (path, "11")]
+    with tempfile.TemporaryDirectory(prefix="moviebot-ocr-") as work:
+        if Image is not None:
+            image = Image.open(path).convert("RGB")
+            width, height = image.size
+            # Instagram screenshots often contain a title in only one band;
+            # overlapping crops prevent the surrounding UI from dominating OCR.
+            for index in range(4):
+                top = max(0, int(height * (index * 0.22)))
+                bottom = min(height, int(height * (index * 0.22 + 0.50)))
+                crop = image.crop((0, top, width, bottom))
+                gray = ImageOps.grayscale(crop)
+                gray = ImageOps.autocontrast(gray)
+                gray = ImageEnhance.Contrast(gray).enhance(1.8)
+                gray = gray.resize((gray.width * 2, gray.height * 2))
+                crop_path = str(Path(work) / f"crop-{index}.png")
+                gray.save(crop_path)
+                sources.append((crop_path, "11"))
+        outputs = []
+        for source, psm in sources:
+            completed = subprocess.run(
+                [os.getenv("TESSERACT_BIN", "tesseract"), source, "stdout", "--psm", psm],
+                capture_output=True, text=True, timeout=45, check=False,
+            )
+            if completed.returncode == 0:
+                outputs.append(completed.stdout)
+        if not outputs:
+            raise RuntimeError("OCR failed")
+        return "\n".join(outputs)
 
 
 def list_text(store: Store, chat_id: int, seen: bool | None = None) -> str:
