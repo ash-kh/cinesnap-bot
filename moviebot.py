@@ -320,6 +320,46 @@ def vision_titles(path: str, caption: str = "") -> list[str]:
         return []
 
 
+def grok_titles(path: str, caption: str = "") -> list[str]:
+    """Use xAI's OpenAI-compatible image understanding endpoint."""
+    api_key = os.getenv("XAI_API_KEY")
+    if not api_key:
+        return []
+    image_data = base64.b64encode(Path(path).read_bytes()).decode("ascii")
+    prompt = (
+        "Identify movie titles visible in this screenshot. Ignore phone status bars, "
+        "social-media usernames, buttons, likes, comments, captions, actors, directors, "
+        "years, and descriptions. Return only likely movie titles, one per line, with "
+        "no bullets or explanation. Return an empty response if uncertain."
+    )
+    if caption:
+        prompt += f"\nThe Telegram caption was: {caption[:2000]}"
+    body = {
+        "model": os.getenv("XAI_VISION_MODEL", "grok-4.20-0309-non-reasoning"),
+        "messages": [{"role": "user", "content": [
+            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{image_data}", "detail": "high"}},
+            {"type": "text", "text": prompt},
+        ]}],
+        "temperature": 0,
+    }
+    request = urllib.request.Request(
+        "https://api.x.ai/v1/chat/completions",
+        data=json.dumps(body).encode(),
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response:
+            payload = json.loads(response.read())
+        content = payload.get("choices", [{}])[0].get("message", {}).get("content", "")
+        if isinstance(content, list):
+            content = "\n".join(part.get("text", "") for part in content if part.get("type") == "text")
+        return extract_titles(content)
+    except Exception:
+        LOG.exception("Grok vision fallback failed; continuing with local OCR")
+        return []
+
+
 def list_text(store: Store, chat_id: int, seen: bool | None = None) -> str:
     rows = store.list(chat_id, seen)
     if not rows:
@@ -394,7 +434,7 @@ def handle(bot: Telegram, store: Store, message: dict) -> None:
         # because a creator's caption often contains the exact movie title.
         caption = message.get("caption", "")
         caption_titles = extract_titles(caption)
-        ai_titles = vision_titles(image_path, caption)
+        ai_titles = grok_titles(image_path, caption) if os.getenv("XAI_API_KEY") else vision_titles(image_path, caption)
         if ai_titles:
             titles = unique_titles(ai_titles, caption_titles)
         else:
