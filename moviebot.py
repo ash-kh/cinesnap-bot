@@ -196,8 +196,35 @@ class Telegram:
             raise RuntimeError(payload.get("description", "Telegram API error"))
         return payload["result"]
 
-    def send(self, chat_id: int, text: str) -> None:
-        self.call("sendMessage", chat_id=chat_id, text=text)
+    def send(self, chat_id: int, text: str, reply_markup: dict | None = None) -> None:
+        params = {"chat_id": chat_id, "text": text}
+        if reply_markup:
+            params["reply_markup"] = json.dumps(reply_markup)
+        self.call("sendMessage", **params)
+
+    def send_menu(self, chat_id: int, text: str = "Choose an option:") -> None:
+        self.send(chat_id, text, {"inline_keyboard": [
+            [{"text": "🎬 All movies", "callback_data": "menu:list"},
+             {"text": "⏳ Not seen", "callback_data": "menu:unseen"}],
+            [{"text": "✅ Seen", "callback_data": "menu:seen"},
+             {"text": "⭐ Rate a movie", "callback_data": "menu:rate"}],
+            [{"text": "🔌 Provider status", "callback_data": "menu:status"},
+             {"text": "❓ Help", "callback_data": "menu:help"}],
+        ]})
+
+    def configure_menu(self) -> None:
+        commands = [
+            {"command": "menu", "description": "Show menu options"},
+            {"command": "list", "description": "Show all movies"},
+            {"command": "unseen", "description": "Show movies not seen"},
+            {"command": "seen", "description": "Show movies seen"},
+            {"command": "rate", "description": "Rate a movie: /rate 3 8"},
+            {"command": "status", "description": "Check vision providers"},
+            {"command": "clear", "description": "Clear your movie list"},
+            {"command": "help", "description": "Show instructions"},
+        ]
+        self.call("setMyCommands", commands=json.dumps(commands))
+        self.call("setChatMenuButton", menu_button=json.dumps({"type": "commands"}))
 
     def send_choices(self, chat_id: int, token: str, titles: list[str]) -> None:
         keyboard = [[{"text": title, "callback_data": f"pick:{token}:{i}"}] for i, title in enumerate(titles)]
@@ -411,6 +438,21 @@ def list_text(store: Store, chat_id: int, seen: bool | None = None) -> str:
     return heading + ":\n" + "\n".join(f"{i}. {title}" + (f" — rated {rating}/10" if rating else "") for i, (title, rating) in enumerate(rows, 1))
 
 
+def provider_status_text() -> str:
+    return ("Vision providers configured:\n"
+            f"Gemini: {'yes' if os.getenv('GEMINI_API_KEY') else 'no'}\n"
+            f"Grok: {'yes' if os.getenv('XAI_API_KEY') else 'no'}\n"
+            f"OpenAI: {'yes' if os.getenv('OPENAI_API_KEY') else 'no'}")
+
+
+def help_text() -> str:
+    return ("Send me a screenshot and I’ll find the movie title in the extra text.\n\n"
+            "/list — all movies\n/seen — movies you have seen\n/unseen — movies you have not seen\n"
+            "/seen <number> — mark a movie seen\n/unseen <number> — mark it not seen\n"
+            "/rate <number> <1-10> — rate and mark seen\n/status — check vision providers\n"
+            "/clear — clear your list\n/menu — show these buttons")
+
+
 def command_parts(text: str) -> list[str]:
     return text.split()
 
@@ -422,6 +464,21 @@ def handle_callback(bot: Telegram, store: Store, callback: dict) -> None:
     if chat_id is None or ":" not in data:
         return
     action, token, *rest = data.split(":")
+    if action == "menu":
+        if token == "list":
+            bot.send(chat_id, list_text(store, chat_id))
+        elif token == "seen":
+            bot.send(chat_id, list_text(store, chat_id, True))
+        elif token == "unseen":
+            bot.send(chat_id, list_text(store, chat_id, False))
+        elif token == "rate":
+            bot.send(chat_id, "Use /list to find a movie number, then rate it with /rate <number> <1-10>.\nExample: /rate 3 8")
+        elif token == "status":
+            bot.send(chat_id, provider_status_text())
+        else:
+            bot.send_menu(chat_id, help_text())
+        bot.answer_callback(callback["id"], "Done")
+        return
     titles = store.take_pending(chat_id, token)
     if not titles:
         bot.answer_callback(callback["id"], "That choice has expired.")
@@ -438,8 +495,8 @@ def handle(bot: Telegram, store: Store, message: dict) -> None:
     if chat_id is None:
         return
     text = (message.get("text") or "").strip()
-    if text.startswith("/start") or text.startswith("/help"):
-        bot.send(chat_id, "Send me a screenshot and I’ll find the movie title in the extra text.\n\nCommands:\n/list — all movies\n/seen — movies you have seen\n/unseen — movies you have not seen\n/seen <number> — mark a movie seen\n/rate <number> <1-10> — rate and mark seen\n/clear — clear your list")
+    if text.startswith("/start") or text.startswith("/help") or text.startswith("/menu"):
+        bot.send_menu(chat_id, help_text())
         return
     parts = command_parts(text)
     command = parts[0].split("@", 1)[0] if parts else ""
@@ -465,16 +522,13 @@ def handle(bot: Telegram, store: Store, message: dict) -> None:
         bot.send(chat_id, "Cleared your movie list.")
         return
     if command == "/status":
-        bot.send(chat_id, "Vision providers configured:\n" +
-                 f"Gemini: {'yes' if os.getenv('GEMINI_API_KEY') else 'no'}\n" +
-                 f"Grok: {'yes' if os.getenv('XAI_API_KEY') else 'no'}\n" +
-                 f"OpenAI: {'yes' if os.getenv('OPENAI_API_KEY') else 'no'}")
+        bot.send(chat_id, provider_status_text())
         return
 
     file_id = photo_file_id(message)
     if not file_id:
         if text:
-            bot.send(chat_id, "Please send a screenshot, or use /list to see your saved movies.")
+            bot.send_menu(chat_id, "I didn’t understand that. Send a screenshot or choose an option:")
         return
     with tempfile.TemporaryDirectory(prefix="moviebot-") as temp_dir:
         image_path = str(Path(temp_dir) / "screenshot")
@@ -536,6 +590,7 @@ def main() -> None:
     if not token:
         raise SystemExit("Set TELEGRAM_BOT_TOKEN before starting the bot.")
     bot = Telegram(token)
+    bot.configure_menu()
     store = Store(os.getenv("MOVIE_DB", "movies.sqlite3"))
     offset = 0
     LOG.info("Movie list bot is running")

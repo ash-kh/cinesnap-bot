@@ -33,6 +33,7 @@ Commands:
 - `/rate 3 8` — rate movie 3 from 1–10 and mark it seen
 - `/clear` — remove all movies
 - `/status` — show which vision providers are configured (never shows keys)
+- `/menu` — show an interactive menu of common actions
 
 ## Deployment
 
