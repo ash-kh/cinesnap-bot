@@ -32,6 +32,7 @@ Commands:
 - `/seen 3` or `/unseen 3` — change the status of movie 3 from `/list`
 - `/rate 3 8` — rate movie 3 from 1–10 and mark it seen
 - `/clear` — remove all movies
+- `/status` — show which vision providers are configured (never shows keys)
 
 ## Deployment
 

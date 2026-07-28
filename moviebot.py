@@ -464,6 +464,12 @@ def handle(bot: Telegram, store: Store, message: dict) -> None:
         store.clear(chat_id)
         bot.send(chat_id, "Cleared your movie list.")
         return
+    if command == "/status":
+        bot.send(chat_id, "Vision providers configured:\n" +
+                 f"Gemini: {'yes' if os.getenv('GEMINI_API_KEY') else 'no'}\n" +
+                 f"Grok: {'yes' if os.getenv('XAI_API_KEY') else 'no'}\n" +
+                 f"OpenAI: {'yes' if os.getenv('OPENAI_API_KEY') else 'no'}")
+        return
 
     file_id = photo_file_id(message)
     if not file_id:
@@ -477,6 +483,7 @@ def handle(bot: Telegram, store: Store, message: dict) -> None:
         # because a creator's caption often contains the exact movie title.
         caption = message.get("caption", "")
         caption_titles = extract_titles(caption)
+        vision_configured = any(os.getenv(name) for name in ("GEMINI_API_KEY", "XAI_API_KEY", "OPENAI_API_KEY"))
         provider = "local OCR"
         if os.getenv("GEMINI_API_KEY"):
             LOG.info("Trying Gemini vision model %s", os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite"))
@@ -499,11 +506,16 @@ def handle(bot: Telegram, store: Store, message: dict) -> None:
             LOG.info("Using %s candidates: %s", provider, ai_titles)
             titles = unique_titles(ai_titles, caption_titles)
         else:
-            try:
-                image_titles = extract_titles(ocr(image_path))
-            except Exception:
-                LOG.exception("Local OCR failed")
+            # Once a vision provider is configured, do not fall back to noisy
+            # local OCR after an API failure; that creates false movie names.
+            if vision_configured:
                 image_titles = []
+            else:
+                try:
+                    image_titles = extract_titles(ocr(image_path))
+                except Exception:
+                    LOG.exception("Local OCR failed")
+                    image_titles = []
             titles = unique_titles(caption_titles, image_titles)
             LOG.info("Using local OCR/caption candidates: %s", titles)
     if len(titles) > 1:
@@ -515,7 +527,7 @@ def handle(bot: Telegram, store: Store, message: dict) -> None:
     if added:
         bot.send(chat_id, "Added:\n" + "\n".join(f"• {title}" for title in added) + f"\n\nYou have {store.count(chat_id)} movie(s). Use /seen <number> or /rate <number> <1-10> when you watch it.")
     else:
-        bot.send(chat_id, "I couldn’t find a new movie title in that screenshot. Try a clearer crop with the title visible.")
+        bot.send(chat_id, "I couldn’t confidently identify a movie title. Add the title as a caption, or check /status and the Railway logs to confirm a vision provider is configured.")
 
 
 def main() -> None:
