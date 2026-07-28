@@ -8,6 +8,5 @@ WORKDIR /app
 COPY moviebot.py README.md ./
 
 ENV MOVIE_DB=/data/movies.sqlite3
-VOLUME ["/data"]
 
 CMD ["python", "moviebot.py"]
