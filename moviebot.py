@@ -29,6 +29,7 @@ API_ROOT = "https://api.telegram.org/bot{token}"
 def clean_title(line: str) -> str | None:
     """Turn one OCR line into a plausible movie title, or discard it."""
     line = re.sub(r"\s+", " ", line).strip(" -–—|•·:;,.!?()[]{}\t")
+    line = re.sub(r"^(?:movie|film|title)\s*[:\-]\s*", "", line, flags=re.I)
     if not line or len(line) < 2 or len(line) > 120:
         return None
     if re.search(r"https?://|www\.|@\w+|\.(com|net|org)\b", line, re.I):
@@ -204,6 +205,17 @@ def photo_file_id(message: dict) -> str | None:
     return None
 
 
+def unique_titles(*groups: list[str]) -> list[str]:
+    results: list[str] = []
+    seen: set[str] = set()
+    for group in groups:
+        for title in group:
+            if title.casefold() not in seen:
+                seen.add(title.casefold())
+                results.append(title)
+    return results
+
+
 def ocr(path: str) -> str:
     """Run Tesseract on the full image and enhanced overlapping crops."""
     sources = [(path, "6"), (path, "11")]
@@ -307,7 +319,11 @@ def handle(bot: Telegram, store: Store, message: dict) -> None:
     with tempfile.TemporaryDirectory(prefix="moviebot-") as temp_dir:
         image_path = str(Path(temp_dir) / "screenshot")
         bot.download_file(file_id, image_path)
-        titles = extract_titles(ocr(image_path))
+        # Telegram captions are separate from the image payload. Prefer them
+        # because a creator's caption often contains the exact movie title.
+        caption_titles = extract_titles(message.get("caption", ""))
+        image_titles = extract_titles(ocr(image_path))
+        titles = unique_titles(caption_titles, image_titles)
     if len(titles) > 1:
         token = store.pending(chat_id, titles)
         bot.send_choices(chat_id, token, titles)

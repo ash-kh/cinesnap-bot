@@ -1,6 +1,6 @@
 # Telegram movie-list bot
 
-Send the bot screenshots containing movie names—even when the screenshot also has descriptions, ratings, buttons, or other interface text. It downloads each image, runs OCR, filters out likely UI/description lines, and stores a deduplicated list per Telegram chat.
+Send the bot screenshots containing movie names—even when the screenshot also has descriptions, ratings, buttons, or other interface text. It checks the Telegram caption first, then runs OCR on the image, filters out likely UI/description lines, and stores a deduplicated list per Telegram chat.
 
 ## Run locally
 

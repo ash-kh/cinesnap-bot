@@ -1,6 +1,6 @@
 import unittest
 
-from moviebot import clean_title, extract_titles
+from moviebot import clean_title, extract_titles, unique_titles
 
 
 class ExtractionTests(unittest.TestCase):
@@ -17,6 +17,13 @@ class ExtractionTests(unittest.TestCase):
     def test_ignores_long_description_lines(self):
         text = "A movie about a detective who returns home to solve a mystery.\nThe Matrix"
         self.assertEqual(extract_titles(text), ["The Matrix"])
+
+    def test_supports_caption_labels_and_prioritizes_caption_titles(self):
+        self.assertEqual(extract_titles("Movie: Lady Bird"), ["Lady Bird"])
+        self.assertEqual(
+            unique_titles(extract_titles("Lady Bird"), extract_titles("Lady Bird\nThe Matrix")),
+            ["Lady Bird", "The Matrix"],
+        )
 
 
 if __name__ == "__main__":
