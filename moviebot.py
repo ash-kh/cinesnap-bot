@@ -360,6 +360,45 @@ def grok_titles(path: str, caption: str = "") -> list[str]:
         return []
 
 
+def gemini_titles(path: str, caption: str = "") -> list[str]:
+    """Use Google's Gemini image understanding endpoint."""
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        return []
+    image_data = base64.b64encode(Path(path).read_bytes()).decode("ascii")
+    prompt = (
+        "Identify movie titles visible in this screenshot. Ignore phone status bars, "
+        "social-media usernames, buttons, likes, comments, captions, actors, directors, "
+        "years, and descriptions. Return only likely movie titles, one per line, with "
+        "no bullets or explanation. Return an empty response if uncertain."
+    )
+    if caption:
+        prompt += f"\nThe Telegram caption was: {caption[:2000]}"
+    model = os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite")
+    body = {"contents": [{"parts": [
+        {"inline_data": {"mime_type": "image/png", "data": image_data}},
+        {"text": prompt},
+    ]}]}
+    request = urllib.request.Request(
+        f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
+        data=json.dumps(body).encode(),
+        headers={"x-goog-api-key": api_key, "Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response:
+            payload = json.loads(response.read())
+        text = "\n".join(
+            part.get("text", "")
+            for candidate in payload.get("candidates", [])
+            for part in candidate.get("content", {}).get("parts", [])
+        )
+        return extract_titles(text)
+    except Exception:
+        LOG.exception("Gemini vision fallback failed; trying next provider")
+        return []
+
+
 def list_text(store: Store, chat_id: int, seen: bool | None = None) -> str:
     rows = store.list(chat_id, seen)
     if not rows:
@@ -434,7 +473,11 @@ def handle(bot: Telegram, store: Store, message: dict) -> None:
         # because a creator's caption often contains the exact movie title.
         caption = message.get("caption", "")
         caption_titles = extract_titles(caption)
-        ai_titles = grok_titles(image_path, caption) if os.getenv("XAI_API_KEY") else vision_titles(image_path, caption)
+        ai_titles = gemini_titles(image_path, caption)
+        if not ai_titles:
+            ai_titles = grok_titles(image_path, caption)
+        if not ai_titles:
+            ai_titles = vision_titles(image_path, caption)
         if ai_titles:
             titles = unique_titles(ai_titles, caption_titles)
         else:
