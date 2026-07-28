@@ -68,10 +68,28 @@ def extract_titles(text: str) -> list[str]:
         if len(raw.strip()) > 80 or len(raw.split()) > 8 or raw.rstrip().endswith((".", ";")):
             continue
         title = clean_title(raw)
-        if title and title.casefold() not in seen:
+        if not title or not title_candidate(title):
+            continue
+        if title.casefold() not in seen:
             seen.add(title.casefold())
             results.append(title)
     return results
+
+
+def title_candidate(title: str) -> bool:
+    """Reject OCR fragments that are very unlikely to be movie titles."""
+    words = re.findall(r"[A-Za-z][A-Za-z'&]*", title)
+    if not words or len(title) < 4:
+        return False
+    if any(len(word) < 3 for word in words):
+        return False
+    if re.search(r"\s[-–—]\s", title) or re.search(r"[{}=|]", title):
+        return False
+    # Short title lines should look like title case or all caps. OCR noise is
+    # commonly a lowercase fragment such as "la" or "hifi iibide".
+    if len(words) <= 4 and not (title.isupper() or all(word[0].isupper() for word in words)):
+        return False
+    return True
 
 
 class Store:
@@ -236,6 +254,13 @@ def ocr(path: str) -> str:
                 crop_path = str(Path(work) / f"crop-{index}.png")
                 gray.save(crop_path)
                 sources.append((crop_path, "11"))
+                if index in (1, 2):
+                    # White title lettering over a photo benefits from a
+                    # binary high-contrast pass.
+                    threshold = gray.point(lambda pixel: 255 if pixel > 165 else 0)
+                    threshold_path = str(Path(work) / f"threshold-{index}.png")
+                    threshold.save(threshold_path)
+                    sources.append((threshold_path, "11"))
         outputs = []
         for source, psm in sources:
             completed = subprocess.run(
@@ -325,6 +350,7 @@ def handle(bot: Telegram, store: Store, message: dict) -> None:
         image_titles = extract_titles(ocr(image_path))
         titles = unique_titles(caption_titles, image_titles)
     if len(titles) > 1:
+        titles = titles[:6]
         token = store.pending(chat_id, titles)
         bot.send_choices(chat_id, token, titles)
         return
