@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import base64
 import logging
 import os
 import re
@@ -274,6 +275,51 @@ def ocr(path: str) -> str:
         return "\n".join(outputs)
 
 
+def vision_titles(path: str, caption: str = "") -> list[str]:
+    """Use an optional vision model when local OCR cannot read the screenshot."""
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        return []
+    image_data = base64.b64encode(Path(path).read_bytes()).decode("ascii")
+    prompt = (
+        "Identify movie titles visible in this screenshot. Ignore the phone status bar, "
+        "social-media usernames, buttons, likes, comments, captions, actor names, "
+        "directors, years, and descriptions. Return only likely movie titles, one per "
+        "line, with no bullets or explanation. If there is no confident movie title, "
+        "return an empty response."
+    )
+    if caption:
+        prompt += f"\nThe Telegram caption was: {caption[:2000]}"
+    body = {
+        "model": os.getenv("OPENAI_VISION_MODEL", "gpt-5.6-luna"),
+        "input": [{"role": "user", "content": [
+            {"type": "input_text", "text": prompt},
+            {"type": "input_image", "image_url": f"data:image/png;base64,{image_data}", "detail": "high"},
+        ]}],
+    }
+    request = urllib.request.Request(
+        "https://api.openai.com/v1/responses",
+        data=json.dumps(body).encode(),
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response:
+            payload = json.loads(response.read())
+        output = payload.get("output_text", "")
+        if not output:
+            output = "\n".join(
+                item.get("text", "")
+                for item in payload.get("output", [])
+                for item in item.get("content", [])
+                if item.get("type") == "output_text"
+            )
+        return extract_titles(output)
+    except Exception:
+        LOG.exception("Vision fallback failed; continuing with local OCR")
+        return []
+
+
 def list_text(store: Store, chat_id: int, seen: bool | None = None) -> str:
     rows = store.list(chat_id, seen)
     if not rows:
@@ -346,9 +392,18 @@ def handle(bot: Telegram, store: Store, message: dict) -> None:
         bot.download_file(file_id, image_path)
         # Telegram captions are separate from the image payload. Prefer them
         # because a creator's caption often contains the exact movie title.
-        caption_titles = extract_titles(message.get("caption", ""))
-        image_titles = extract_titles(ocr(image_path))
-        titles = unique_titles(caption_titles, image_titles)
+        caption = message.get("caption", "")
+        caption_titles = extract_titles(caption)
+        ai_titles = vision_titles(image_path, caption)
+        if ai_titles:
+            titles = unique_titles(ai_titles, caption_titles)
+        else:
+            try:
+                image_titles = extract_titles(ocr(image_path))
+            except Exception:
+                LOG.exception("Local OCR failed")
+                image_titles = []
+            titles = unique_titles(caption_titles, image_titles)
     if len(titles) > 1:
         titles = titles[:6]
         token = store.pending(chat_id, titles)

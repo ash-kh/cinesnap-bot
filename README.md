@@ -22,6 +22,8 @@ On macOS, this is enough to run the bot in a terminal. Keep that terminal open, 
 
 The SQLite database is `movies.sqlite3` by default. Set `MOVIE_DB` to change its location. Images can be sent as Telegram photos or image documents. If several title-shaped lines are found, the bot asks which one to add (or lets you add all).
 
+For difficult screenshots, optionally add `OPENAI_API_KEY` to the deployment variables. CineSnap will then use an image-capable OpenAI model as a fallback after local OCR; this requires an OpenAI API key and may incur API usage charges. You can override the model with `OPENAI_VISION_MODEL`.
+
 Commands:
 
 - `/list` — show every movie, with ratings
