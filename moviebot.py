@@ -354,7 +354,9 @@ def grok_titles(path: str, caption: str = "") -> list[str]:
         content = payload.get("choices", [{}])[0].get("message", {}).get("content", "")
         if isinstance(content, list):
             content = "\n".join(part.get("text", "") for part in content if part.get("type") == "text")
-        return extract_titles(content)
+        titles = extract_titles(content)
+        LOG.info("Grok vision returned %d candidate(s): %s", len(titles), titles)
+        return titles
     except Exception:
         LOG.exception("Grok vision fallback failed; continuing with local OCR")
         return []
@@ -393,7 +395,9 @@ def gemini_titles(path: str, caption: str = "") -> list[str]:
             for candidate in payload.get("candidates", [])
             for part in candidate.get("content", {}).get("parts", [])
         )
-        return extract_titles(text)
+        titles = extract_titles(text)
+        LOG.info("Gemini vision returned %d candidate(s): %s", len(titles), titles)
+        return titles
     except Exception:
         LOG.exception("Gemini vision fallback failed; trying next provider")
         return []
@@ -473,12 +477,26 @@ def handle(bot: Telegram, store: Store, message: dict) -> None:
         # because a creator's caption often contains the exact movie title.
         caption = message.get("caption", "")
         caption_titles = extract_titles(caption)
+        provider = "local OCR"
+        if os.getenv("GEMINI_API_KEY"):
+            LOG.info("Trying Gemini vision model %s", os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite"))
         ai_titles = gemini_titles(image_path, caption)
         if not ai_titles:
+            if os.getenv("XAI_API_KEY"):
+                LOG.info("Trying Grok vision model %s", os.getenv("XAI_VISION_MODEL", "grok-4.20-0309-non-reasoning"))
             ai_titles = grok_titles(image_path, caption)
+            if ai_titles:
+                provider = "Grok"
         if not ai_titles:
+            if os.getenv("OPENAI_API_KEY"):
+                LOG.info("Trying OpenAI vision model %s", os.getenv("OPENAI_VISION_MODEL", "gpt-5.6-luna"))
             ai_titles = vision_titles(image_path, caption)
+            if ai_titles:
+                provider = "OpenAI"
         if ai_titles:
+            if provider == "local OCR":
+                provider = "Gemini"
+            LOG.info("Using %s candidates: %s", provider, ai_titles)
             titles = unique_titles(ai_titles, caption_titles)
         else:
             try:
@@ -487,6 +505,7 @@ def handle(bot: Telegram, store: Store, message: dict) -> None:
                 LOG.exception("Local OCR failed")
                 image_titles = []
             titles = unique_titles(caption_titles, image_titles)
+            LOG.info("Using local OCR/caption candidates: %s", titles)
     if len(titles) > 1:
         titles = titles[:6]
         token = store.pending(chat_id, titles)
