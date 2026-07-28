@@ -62,6 +62,9 @@ def extract_titles(text: str) -> list[str]:
 
 class Store:
     def __init__(self, path: str):
+        # Railway mounts persistent storage at runtime; ensure the directory
+        # also works when running locally or before a volume is attached.
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
         self.db = sqlite3.connect(path)
         self.db.execute("""CREATE TABLE IF NOT EXISTS movies (
             chat_id INTEGER NOT NULL,
