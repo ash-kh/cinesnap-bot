@@ -586,9 +586,12 @@ def handle(bot: Telegram, store: Store, message: dict) -> None:
 
 def main() -> None:
     logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"), format="%(asctime)s %(levelname)s %(message)s")
-    token = os.getenv("TELEGRAM_BOT_TOKEN")
+    # Use a CineSnap-specific name first to avoid ambiguity with a stale or
+    # shared Railway variable. Keep the original name for existing installs.
+    token = os.getenv("CINESNAP_TELEGRAM_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN")
     if not token:
-        raise SystemExit("Set TELEGRAM_BOT_TOKEN before starting the bot.")
+        raise SystemExit("Set CINESNAP_TELEGRAM_TOKEN before starting the bot.")
+    LOG.info("Using %s for Telegram authentication", "CINESNAP_TELEGRAM_TOKEN" if os.getenv("CINESNAP_TELEGRAM_TOKEN") else "TELEGRAM_BOT_TOKEN")
     bot = Telegram(token)
     try:
         bot.configure_menu()

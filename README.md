@@ -14,7 +14,7 @@ Send the bot screenshots containing movie names—even when the screenshot also 
 3. Start it:
 
    ```bash
-   export TELEGRAM_BOT_TOKEN="123456:replace-me"
+   export CINESNAP_TELEGRAM_TOKEN="123456:replace-me"
    python3 moviebot.py
    ```
 
@@ -45,7 +45,7 @@ Run the process on any small always-on Linux host with persistent storage. This 
 docker build -t movie-list-bot .
 docker volume create movie-list-data
 docker run -d --name movie-list-bot --restart unless-stopped \
-  -e TELEGRAM_BOT_TOKEN="123456:replace-me" \
+  -e CINESNAP_TELEGRAM_TOKEN="123456:replace-me" \
   -v movie-list-data:/data \
   movie-list-bot
 ```
@@ -57,7 +57,7 @@ View logs with `docker logs -f movie-list-bot`. The SQLite database is stored in
 Install Python 3.10+, Tesseract, and Git, copy this directory to the server, then run:
 
 ```bash
-export TELEGRAM_BOT_TOKEN="123456:replace-me"
+export CINESNAP_TELEGRAM_TOKEN="123456:replace-me"
 python3 moviebot.py
 ```
 
