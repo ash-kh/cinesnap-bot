@@ -90,6 +90,12 @@ class BookStore:
         books = self.list(chat_id)
         return books[index - 1] if 1 <= index <= len(books) else None
 
+    def update_metadata(self, chat_id: int, index: int, book: dict) -> None:
+        row = self.by_index(chat_id, index)
+        if not row: return
+        self.db.execute("UPDATE books SET description=?,cover_url=?,online_rating=? WHERE chat_id=? AND book_key=?", (book.get("description"), book.get("cover_url"), book.get("online_rating"), chat_id, row[1]))
+        self.db.commit()
+
     def by_index(self, chat_id: int, index: int) -> tuple[str, str] | None:
         return self.db.execute("SELECT title,book_key FROM books WHERE chat_id=? ORDER BY added_at,book_key LIMIT 1 OFFSET ?", (chat_id, index - 1)).fetchone()
 
@@ -236,7 +242,8 @@ def google_books(title: str) -> list[dict]:
             if name:
                 date = info.get("publishedDate", "")
                 images = info.get("imageLinks", {})
-                books.append({"title": name, "authors": ", ".join(info.get("authors", [])), "year": int(date[:4]) if date[:4].isdigit() else None, "book_id": item.get("id"), "description": info.get("description") or "", "cover_url": images.get("thumbnail") or images.get("smallThumbnail"), "online_rating": info.get("averageRating")})
+                cover = images.get("thumbnail") or images.get("smallThumbnail")
+                books.append({"title": name, "authors": ", ".join(info.get("authors", [])), "year": int(date[:4]) if date[:4].isdigit() else None, "book_id": item.get("id"), "description": info.get("description") or "", "cover_url": cover.replace("http://", "https://", 1) if cover else None, "online_rating": info.get("averageRating")})
         return books
     except Exception:
         LOG.exception("Google Books search failed")
@@ -265,6 +272,16 @@ def send_book_detail(bot: BookTelegram, store: BookStore, chat_id: int, index: i
     if not book:
         bot.send(chat_id, "I couldn’t find that book number. Use /list first.")
         return
+    if book.get("book_id") and not (book.get("cover_url") or book.get("description") or book.get("online_rating") is not None):
+        try:
+            with urllib.request.urlopen(f"https://www.googleapis.com/books/v1/volumes/{book['book_id']}", timeout=20) as response:
+                payload = json.loads(response.read())
+            info, images = payload.get("volumeInfo", {}), payload.get("volumeInfo", {}).get("imageLinks", {})
+            cover = images.get("thumbnail") or images.get("smallThumbnail")
+            store.update_metadata(chat_id, index, {"description": info.get("description") or "", "cover_url": cover.replace("http://", "https://", 1) if cover else None, "online_rating": info.get("averageRating")})
+            book = store.details(chat_id, index) or book
+        except Exception:
+            LOG.exception("Google Books detail lookup failed")
     text = book_label(book)
     if book.get("online_rating") is not None:
         text += f"\n\nGoogle Books community rating: {float(book['online_rating']):.1f}/5"

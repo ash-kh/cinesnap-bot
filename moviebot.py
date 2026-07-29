@@ -99,7 +99,9 @@ def text_entry_title(text: str) -> str | None:
         return None
     text = re.sub(r"(?<!\w)#[\w-]+", "", text).strip()
     title = clean_title(text)
-    return title if title and title_candidate(title) else None
+    # A manual entry is intentional; permit normal lowercase typing such as
+    # "lady bird" even though screenshot OCR uses stricter noise filtering.
+    return title if title and re.search(r"[A-Za-z]", title) else None
 
 
 class Store:
@@ -202,6 +204,16 @@ class Store:
     def details(self, chat_id: int, index: int) -> dict | None:
         rows = self.list(chat_id)
         return rows[index - 1] if 1 <= index <= len(rows) else None
+
+    def update_metadata(self, chat_id: int, index: int, movie: dict) -> None:
+        current = self.get_by_index(chat_id, index)
+        if not current:
+            return
+        self.db.execute(
+            "UPDATE movies SET overview = ?, poster_url = ?, online_rating = ? WHERE chat_id = ? AND title_key = ?",
+            (movie.get("overview"), movie.get("poster_url"), movie.get("online_rating"), chat_id, current[1]),
+        )
+        self.db.commit()
 
     def get_by_index(self, chat_id: int, index: int) -> tuple[str, str] | None:
         row = self.db.execute(
@@ -438,35 +450,58 @@ def movie_label(movie: dict) -> str:
     return label
 
 
+def tmdb_get(path: str, params: dict[str, str]) -> dict:
+    """Call TMDb with either its short v3 key or a long Read Access Token."""
+    api_key = os.getenv("TMDB_API_KEY")
+    if not api_key:
+        return {}
+    headers = {"accept": "application/json"}
+    if api_key.startswith("eyJ"):
+        headers["Authorization"] = f"Bearer {api_key}"
+    else:
+        params["api_key"] = api_key
+    query = urllib.parse.urlencode(params)
+    request = urllib.request.Request(f"https://api.themoviedb.org/3/{path}?{query}", headers=headers)
+    with urllib.request.urlopen(request, timeout=20) as response:
+        return json.loads(response.read())
+
+
+def tmdb_movie(result: dict) -> dict:
+    name = result.get("title") or result.get("original_title")
+    date = result.get("release_date") or ""
+    poster = result.get("poster_path")
+    return {
+        "title": name, "year": int(date[:4]) if date[:4].isdigit() else None, "tmdb_id": result.get("id"),
+        "overview": result.get("overview") or "", "poster_url": f"https://image.tmdb.org/t/p/w500{poster}" if poster else None,
+        "online_rating": result.get("vote_average"),
+    }
+
+
 def tmdb_matches(title: str) -> list[dict]:
     """Search TMDb and return a short, user-selectable list of movie matches."""
     api_key = os.getenv("TMDB_API_KEY")
     if not api_key:
         return []
-    query = urllib.parse.urlencode({"query": title, "include_adult": "false", "language": "en-US"})
-    request = urllib.request.Request(
-        f"https://api.themoviedb.org/3/search/movie?{query}",
-        headers={"Authorization": f"Bearer {api_key}", "accept": "application/json"},
-    )
     try:
-        with urllib.request.urlopen(request, timeout=20) as response:
-            results = json.loads(response.read()).get("results", [])
+        results = tmdb_get("search/movie", {"query": title, "include_adult": "false", "language": "en-US"}).get("results", [])
         matches = []
         for result in results[:5]:
-            name = result.get("title") or result.get("original_title")
-            if not name:
-                continue
-            date = result.get("release_date") or ""
-            poster = result.get("poster_path")
-            matches.append({
-                "title": name, "year": int(date[:4]) if date[:4].isdigit() else None, "tmdb_id": result.get("id"),
-                "overview": result.get("overview") or "", "poster_url": f"https://image.tmdb.org/t/p/w500{poster}" if poster else None,
-                "online_rating": result.get("vote_average"),
-            })
+            movie = tmdb_movie(result)
+            if movie["title"]:
+                matches.append(movie)
         return matches
     except Exception:
         LOG.exception("TMDb search failed for %r; saving without a TMDb match", title)
         return []
+
+
+def tmdb_details(tmdb_id: int) -> dict | None:
+    try:
+        result = tmdb_get(f"movie/{tmdb_id}", {"language": "en-US"})
+        return tmdb_movie(result) if result.get("id") else None
+    except Exception:
+        LOG.exception("TMDb detail lookup failed for %s", tmdb_id)
+        return None
 
 
 def ocr(path: str) -> str:
@@ -674,6 +709,11 @@ def send_movie_detail(bot: Telegram, store: Store, chat_id: int, index: int) -> 
     if not movie:
         bot.send(chat_id, "I couldn’t find that movie number. Use /list first.")
         return
+    if movie.get("tmdb_id") and not (movie.get("poster_url") or movie.get("overview") or movie.get("online_rating") is not None):
+        refreshed = tmdb_details(movie["tmdb_id"])
+        if refreshed:
+            store.update_metadata(chat_id, index, refreshed)
+            movie = store.details(chat_id, index) or movie
     text = movie_detail_text(movie)
     if movie.get("poster_url"):
         try:

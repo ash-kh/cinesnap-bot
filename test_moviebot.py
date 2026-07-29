@@ -58,6 +58,7 @@ class ExtractionTests(unittest.TestCase):
 
     def test_manual_text_entry_removes_tags(self):
         self.assertEqual(text_entry_title("Lady Bird #favorite"), "Lady Bird")
+        self.assertEqual(text_entry_title("lady bird"), "Lady bird")
         self.assertIsNone(text_entry_title("&"))
 
     def test_details_and_statistics_keep_provider_metadata(self):
