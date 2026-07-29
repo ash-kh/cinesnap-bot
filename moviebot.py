@@ -93,6 +93,15 @@ def title_candidate(title: str) -> bool:
     return True
 
 
+def text_entry_title(text: str) -> str | None:
+    """Turn a manual Telegram message into one title, preserving hashtags as tags elsewhere."""
+    if text.lstrip().startswith("/"):
+        return None
+    text = re.sub(r"(?<!\w)#[\w-]+", "", text).strip()
+    title = clean_title(text)
+    return title if title and title_candidate(title) else None
+
+
 class Store:
     def __init__(self, path: str):
         # Railway mounts persistent storage at runtime; ensure the directory
@@ -304,6 +313,7 @@ class Telegram:
             {"command": "unseen", "description": "Show movies not seen"},
             {"command": "seen", "description": "Show movies seen"},
             {"command": "rate", "description": "Rate a movie: /rate 3 8"},
+            {"command": "add", "description": "Add a movie by title"},
             {"command": "status", "description": "Check vision providers"},
             {"command": "clear", "description": "Clear your movie list"},
             {"command": "help", "description": "Show instructions"},
@@ -602,6 +612,7 @@ def help_text() -> str:
             "/list — all movies\n/seen — movies you have seen\n/unseen — movies you have not seen\n"
             "/seen <number> — mark a movie seen\n/unseen <number> — mark it not seen\n"
             "/rate <number> <1-10> — rate and mark seen\n/status — check vision providers\n"
+            "/add <movie title> — add a movie by typing its title\n"
             "/tag <number> <tag> — add a tag to a movie\n"
             "/clear — clear your list\n/menu — show these buttons")
 
@@ -739,11 +750,22 @@ def handle(bot: Telegram, store: Store, message: dict) -> None:
     if command == "/status":
         bot.send(chat_id, provider_status_text())
         return
+    if command == "/add":
+        title = text_entry_title(" ".join(parts[1:]))
+        if title:
+            save_or_choose_tmdb(bot, store, chat_id, [title], caption_tags(text))
+        else:
+            bot.send(chat_id, "Use /add followed by a movie title. Example: /add Lady Bird")
+        return
 
     file_id = photo_file_id(message)
     if not file_id:
         if text:
-            bot.send_menu(chat_id, "I didn’t understand that. Send a screenshot or choose an option:")
+            title = text_entry_title(text)
+            if title:
+                save_or_choose_tmdb(bot, store, chat_id, [title], caption_tags(text))
+            else:
+                bot.send_menu(chat_id, "I didn’t understand that. Send a screenshot, type a movie title, or choose an option:")
         return
     with tempfile.TemporaryDirectory(prefix="moviebot-") as temp_dir:
         image_path = str(Path(temp_dir) / "screenshot")

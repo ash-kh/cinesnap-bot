@@ -1,7 +1,7 @@
 import tempfile
 import unittest
 
-from moviebot import Store, caption_tags, clean_title, extract_titles, unique_titles
+from moviebot import Store, caption_tags, clean_title, extract_titles, text_entry_title, unique_titles
 from bookbot import BookStore
 
 
@@ -55,6 +55,10 @@ class ExtractionTests(unittest.TestCase):
             book = {"title": "Dune", "authors": "Frank Herbert", "year": 1965, "book_id": "abc"}
             self.assertEqual(len(store.add(1, [book])), 1)
             self.assertEqual(store.add(1, [book]), [])
+
+    def test_manual_text_entry_removes_tags(self):
+        self.assertEqual(text_entry_title("Lady Bird #favorite"), "Lady Bird")
+        self.assertIsNone(text_entry_title("&"))
 
 
 if __name__ == "__main__":

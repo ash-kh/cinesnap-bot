@@ -33,6 +33,7 @@ Commands:
 - `/unseen` — show movies not yet seen
 - `/seen 3` or `/unseen 3` — change the status of movie 3 from `/list`
 - `/rate 3 8` — rate movie 3 from 1–10 and mark it seen
+- `/add Lady Bird` — add a movie by title (or simply send `Lady Bird`)
 - `/tag 3 favorite` — add a tag to movie 3
 - `/clear` — remove all movies
 - `/status` — show which vision providers are configured (never shows keys)

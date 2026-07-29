@@ -14,7 +14,7 @@ import urllib.request
 import uuid
 from pathlib import Path
 
-from moviebot import Telegram, caption_tags, extract_titles, gemini_titles, grok_titles, ocr, vision_titles
+from moviebot import Telegram, caption_tags, extract_titles, gemini_titles, grok_titles, ocr, text_entry_title, vision_titles
 
 
 LOG = logging.getLogger("bookbot")
@@ -159,6 +159,7 @@ class BookTelegram(Telegram):
             {"command": "unread", "description": "Show books to read"},
             {"command": "read", "description": "Show books read"},
             {"command": "rate", "description": "Rate a book: /rate 3 8"},
+            {"command": "add", "description": "Add a book by title"},
             {"command": "tag", "description": "Tag a book: /tag 3 favorite"},
             {"command": "clear", "description": "Clear your book list"},
         ]
@@ -212,7 +213,7 @@ def list_text(store: BookStore, chat_id: int, read: bool | None = None) -> str:
 
 
 def help_text() -> str:
-    return ("Send a book screenshot; I’ll find the title amid the extra text.\n\n/list — all books\n/read — books read\n/unread — books to read\n/read <number> — mark read\n/unread <number> — mark unread\n/rate <number> <1-10> — rate a book\n/tag <number> <tag> — add a tag\n/clear — clear your list\n/menu — show options")
+    return ("Send a book screenshot; I’ll find the title amid the extra text.\n\n/list — all books\n/read — books read\n/unread — books to read\n/read <number> — mark read\n/unread <number> — mark unread\n/rate <number> <1-10> — rate a book\n/add <book title> — add a book by typing its title\n/tag <number> <tag> — add a tag\n/clear — clear your list\n/menu — show options")
 
 
 def save_or_choose(bot: BookTelegram, store: BookStore, chat_id: int, titles: list[str], tags: list[str]) -> None:
@@ -283,11 +284,19 @@ def handle(bot: BookTelegram, store: BookStore, message: dict) -> None:
     if command == "/tag" and len(parts) >= 3 and parts[1].isdigit():
         tag, title = " ".join(parts[2:]).lstrip("#"), store.tag(chat_id, int(parts[1]), " ".join(parts[2:]).lstrip("#")); bot.send(chat_id, f"Added #{tag.replace(' ', '_')} to “{title}”." if title else "I couldn’t find that book number."); return
     if command == "/clear": store.clear(chat_id); bot.send(chat_id, "Cleared your book list."); return
+    if command == "/add":
+        title = text_entry_title(" ".join(parts[1:]))
+        if title: save_or_choose(bot, store, chat_id, [title], caption_tags(text))
+        else: bot.send(chat_id, "Use /add followed by a book title. Example: /add The Left Hand of Darkness")
+        return
     file_id = (message.get("photo") or [{}])[-1].get("file_id")
     document = message.get("document") or {}
     if not file_id and document.get("mime_type", "").startswith("image/"): file_id = document.get("file_id")
     if not file_id:
-        if text: bot.send_menu(chat_id, "I didn’t understand that. Send a book screenshot or choose an option:")
+        if text:
+            title = text_entry_title(text)
+            if title: save_or_choose(bot, store, chat_id, [title], caption_tags(text))
+            else: bot.send_menu(chat_id, "I didn’t understand that. Send a book screenshot, type a book title, or choose an option:")
         return
     with tempfile.TemporaryDirectory(prefix="bookbot-") as temp:
         path = str(Path(temp) / "screenshot")
