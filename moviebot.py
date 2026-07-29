@@ -590,12 +590,22 @@ def main() -> None:
     if not token:
         raise SystemExit("Set TELEGRAM_BOT_TOKEN before starting the bot.")
     bot = Telegram(token)
-    bot.configure_menu()
+    try:
+        bot.configure_menu()
+    except Exception:
+        LOG.exception("Could not configure Telegram command menu; continuing")
     store = Store(os.getenv("MOVIE_DB", "movies.sqlite3"))
     offset = 0
     LOG.info("Movie list bot is running")
     while True:
-        updates = bot.call("getUpdates", offset=offset, timeout=25, allowed_updates='["message","callback_query"]')
+        try:
+            updates = bot.call("getUpdates", offset=offset, timeout=25, allowed_updates='["message","callback_query"]')
+        except Exception:
+            # A temporary Telegram outage or a duplicate long-poll instance
+            # must not make the container exit and trigger a crash loop.
+            LOG.exception("getUpdates failed; retrying in 5 seconds")
+            time.sleep(5)
+            continue
         for update in updates:
             offset = update["update_id"] + 1
             try:
