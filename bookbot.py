@@ -39,8 +39,13 @@ class BookStore:
             chat_id INTEGER NOT NULL, title TEXT NOT NULL, authors TEXT NOT NULL DEFAULT '',
             year INTEGER, book_id TEXT, book_key TEXT NOT NULL, added_at INTEGER NOT NULL,
             read INTEGER NOT NULL DEFAULT 0, rating INTEGER, tags TEXT NOT NULL DEFAULT '[]',
+            description TEXT, cover_url TEXT, online_rating REAL,
             PRIMARY KEY (chat_id, book_key)
         )""")
+        columns = {row[1] for row in self.db.execute("PRAGMA table_info(books)")}
+        for name, definition in (("description", "TEXT"), ("cover_url", "TEXT"), ("online_rating", "REAL")):
+            if name not in columns:
+                self.db.execute(f"ALTER TABLE books ADD COLUMN {name} {definition}")
         self.db.execute("""CREATE TABLE IF NOT EXISTS pending_choices (
             token TEXT PRIMARY KEY, chat_id INTEGER NOT NULL, items TEXT NOT NULL,
             kind TEXT NOT NULL, selected TEXT NOT NULL DEFAULT '[]', tags TEXT NOT NULL DEFAULT '[]'
@@ -62,21 +67,28 @@ class BookStore:
                 continue
             key = f"{book['title'].casefold()}:{book.get('authors', '').casefold()}:{book.get('year') or ''}"
             cur = self.db.execute(
-                "INSERT OR IGNORE INTO books (chat_id,title,authors,year,book_id,book_key,added_at,tags) VALUES (?,?,?,?,?,?,?,?)",
-                (chat_id, book["title"], book.get("authors", ""), book.get("year"), book.get("book_id"), key, int(time.time()), json.dumps(sorted(set(book.get("tags", [])), key=str.casefold))),
+                "INSERT OR IGNORE INTO books (chat_id,title,authors,year,book_id,book_key,added_at,tags,description,cover_url,online_rating) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (chat_id, book["title"], book.get("authors", ""), book.get("year"), book.get("book_id"), key, int(time.time()), json.dumps(sorted(set(book.get("tags", [])), key=str.casefold)), book.get("description"), book.get("cover_url"), book.get("online_rating")),
             )
             if cur.rowcount:
                 added.append(book_label(book))
         self.db.commit()
         return added
 
-    def list(self, chat_id: int, read: bool | None = None) -> list[dict]:
-        query, params = "SELECT title,authors,year,rating,tags,book_id FROM books WHERE chat_id=?", [chat_id]
+    def list(self, chat_id: int, read: bool | None = None, query_text: str | None = None, tag: str | None = None) -> list[dict]:
+        query, params = "SELECT title,authors,year,rating,tags,book_id,description,cover_url,online_rating FROM books WHERE chat_id=?", [chat_id]
         if read is not None:
             query += " AND read=?"
             params.append(int(read))
+        if query_text:
+            query += " AND (lower(title) LIKE ? OR lower(authors) LIKE ?)"
+            params.extend([f"%{query_text.casefold()}%", f"%{query_text.casefold()}%"])
         query += " ORDER BY added_at, book_key"
-        return [{"title": row[0], "authors": row[1], "year": row[2], "rating": row[3], "tags": json.loads(row[4]), "book_id": row[5]} for row in self.db.execute(query, params)]
+        return [{"title": row[0], "authors": row[1], "year": row[2], "rating": row[3], "tags": json.loads(row[4]), "book_id": row[5], "description": row[6], "cover_url": row[7], "online_rating": row[8]} for row in self.db.execute(query, params) if not tag or tag.casefold() in {item.casefold() for item in json.loads(row[4] or "[]")}]
+
+    def details(self, chat_id: int, index: int) -> dict | None:
+        books = self.list(chat_id)
+        return books[index - 1] if 1 <= index <= len(books) else None
 
     def by_index(self, chat_id: int, index: int) -> tuple[str, str] | None:
         return self.db.execute("SELECT title,book_key FROM books WHERE chat_id=? ORDER BY added_at,book_key LIMIT 1 OFFSET ?", (chat_id, index - 1)).fetchone()
@@ -107,6 +119,26 @@ class BookStore:
             self.db.execute("UPDATE books SET tags=? WHERE chat_id=? AND book_key=?", (json.dumps(tags), chat_id, row[1]))
             self.db.commit()
         return row[0]
+
+    def remove(self, chat_id: int, index: int) -> str | None:
+        row = self.by_index(chat_id, index)
+        if not row: return None
+        self.db.execute("DELETE FROM books WHERE chat_id=? AND book_key=?", (chat_id, row[1]))
+        self.db.commit()
+        return row[0]
+
+    def edit(self, chat_id: int, index: int, title: str) -> str | None:
+        row = self.by_index(chat_id, index)
+        if not row or self.is_duplicate(chat_id, {"title": title}): return None
+        self.db.execute("UPDATE books SET title=?,book_key=?,authors='',year=NULL,book_id=NULL,description=NULL,cover_url=NULL,online_rating=NULL WHERE chat_id=? AND book_key=?", (title, f"{title.casefold()}::", chat_id, row[1]))
+        self.db.commit()
+        return title
+
+    def stats(self, chat_id: int) -> tuple[int, int, float | None, list[str]]:
+        total, read, average = self.db.execute("SELECT count(*),sum(read),avg(rating) FROM books WHERE chat_id=?", (chat_id,)).fetchone()
+        tags = [tag for row in self.db.execute("SELECT tags FROM books WHERE chat_id=?", (chat_id,)) for tag in json.loads(row[0] or "[]")]
+        top = sorted(set(tags), key=lambda item: (-sum(tag.casefold() == item.casefold() for tag in tags), item.casefold()))[:3]
+        return total, read or 0, average, top
 
     def pending(self, chat_id: int, items: list[dict], kind: str, tags: list[str]) -> str:
         token = uuid.uuid4().hex[:12]
@@ -161,6 +193,12 @@ class BookTelegram(Telegram):
             {"command": "rate", "description": "Rate a book: /rate 3 8"},
             {"command": "add", "description": "Add a book by title"},
             {"command": "tag", "description": "Tag a book: /tag 3 favorite"},
+            {"command": "remove", "description": "Remove a book: /remove 3"},
+            {"command": "edit", "description": "Rename a book: /edit 3 Title"},
+            {"command": "search", "description": "Search your books"},
+            {"command": "stats", "description": "Show reading statistics"},
+            {"command": "info", "description": "Show book details: /info 3"},
+            {"command": "group", "description": "Explain shared group lists"},
             {"command": "clear", "description": "Clear your book list"},
         ]
         self.call("setMyCommands", commands=json.dumps(commands))
@@ -197,7 +235,8 @@ def google_books(title: str) -> list[dict]:
             name = info.get("title")
             if name:
                 date = info.get("publishedDate", "")
-                books.append({"title": name, "authors": ", ".join(info.get("authors", [])), "year": int(date[:4]) if date[:4].isdigit() else None, "book_id": item.get("id")})
+                images = info.get("imageLinks", {})
+                books.append({"title": name, "authors": ", ".join(info.get("authors", [])), "year": int(date[:4]) if date[:4].isdigit() else None, "book_id": item.get("id"), "description": info.get("description") or "", "cover_url": images.get("thumbnail") or images.get("smallThumbnail"), "online_rating": info.get("averageRating")})
         return books
     except Exception:
         LOG.exception("Google Books search failed")
@@ -212,8 +251,42 @@ def list_text(store: BookStore, chat_id: int, read: bool | None = None) -> str:
     return heading + ":\n" + "\n".join(f"{i}. {book_label(book)}" + (f" — rated {book['rating']}/10" if book["rating"] else "") for i, book in enumerate(books, 1))
 
 
+def send_book_list(bot: BookTelegram, store: BookStore, chat_id: int, read: bool | None = None) -> None:
+    bot.send(chat_id, list_text(store, chat_id, read))
+    if read is None:
+        books = store.list(chat_id)
+        if books:
+            keyboard = [[{"text": f"ℹ️ {i}. {book['title'][:34]}", "callback_data": f"info:{i}"}] for i, book in enumerate(books[:20], 1)]
+            bot.send(chat_id, "Select a book for its cover, description, and rating:", {"inline_keyboard": keyboard})
+
+
+def send_book_detail(bot: BookTelegram, store: BookStore, chat_id: int, index: int) -> None:
+    book = store.details(chat_id, index)
+    if not book:
+        bot.send(chat_id, "I couldn’t find that book number. Use /list first.")
+        return
+    text = book_label(book)
+    if book.get("online_rating") is not None:
+        text += f"\n\nGoogle Books community rating: {float(book['online_rating']):.1f}/5"
+    if book.get("description"):
+        text += "\n\n" + book["description"]
+    if book.get("cover_url"):
+        try:
+            bot.send_photo(chat_id, book["cover_url"], text)
+            return
+        except Exception:
+            LOG.exception("Could not send Google Books cover")
+    bot.send(chat_id, text)
+
+
+def stats_text(store: BookStore, chat_id: int) -> str:
+    total, read, average, tags = store.stats(chat_id)
+    if not total: return "No reading statistics yet."
+    return f"Reading stats:\nTotal: {total}\nRead: {read}\nTo read: {total - read}" + (f"\nYour average rating: {average:.1f}/10" if average is not None else "") + (f"\nTop tags: {', '.join('#' + tag.replace(' ', '_') for tag in tags)}" if tags else "")
+
+
 def help_text() -> str:
-    return ("Send a book screenshot; I’ll find the title amid the extra text.\n\n/list — all books\n/read — books read\n/unread — books to read\n/read <number> — mark read\n/unread <number> — mark unread\n/rate <number> <1-10> — rate a book\n/add <book title> — add a book by typing its title\n/tag <number> <tag> — add a tag\n/clear — clear your list\n/menu — show options")
+    return ("Send a book screenshot; I’ll find the title amid the extra text.\n\n/list — all books\n/read — books read\n/unread — books to read\n/read <number> — mark read\n/unread <number> — mark unread\n/rate <number> <1-10> — rate a book\n/add <book title> — add a book by typing its title\n/tag <number> <tag> — add a tag\n/tag <tag> — filter by a tag\n/search <words> — search your list\n/info <number> — cover, description, and online rating\n/remove <number> — remove a book\n/edit <number> <title> — rename a book\n/stats — reading statistics\n/group — shared-list help\n/clear — clear your list\n/menu — show options")
 
 
 def save_or_choose(bot: BookTelegram, store: BookStore, chat_id: int, titles: list[str], tags: list[str]) -> None:
@@ -236,8 +309,10 @@ def handle_callback(bot: BookTelegram, store: BookStore, callback: dict) -> None
     if chat_id is None or ":" not in data:
         return
     action, token, *rest = data.split(":")
+    if action == "info" and token.isdigit():
+        send_book_detail(bot, store, chat_id, int(token)); bot.answer_callback(callback["id"], "Opening book details."); return
     if action == "menu":
-        if token == "list": bot.send(chat_id, list_text(store, chat_id))
+        if token == "list": send_book_list(bot, store, chat_id)
         elif token == "read": bot.send(chat_id, list_text(store, chat_id, True))
         elif token == "unread": bot.send(chat_id, list_text(store, chat_id, False))
         elif token == "rate": bot.send(chat_id, "Use /list, then /rate <number> <1-10>.")
@@ -274,15 +349,27 @@ def handle(bot: BookTelegram, store: BookStore, message: dict) -> None:
     parts, command = text.split(), ""
     if parts: command = parts[0].split("@", 1)[0]
     if command in ("/start", "/help", "/menu"): bot.send_menu(chat_id, help_text()); return
-    if command == "/list": bot.send(chat_id, list_text(store, chat_id)); return
+    if command == "/list": send_book_list(bot, store, chat_id); return
     if command == "/read" and len(parts) == 1: bot.send(chat_id, list_text(store, chat_id, True)); return
     if command == "/unread" and len(parts) == 1: bot.send(chat_id, list_text(store, chat_id, False)); return
     if command in ("/read", "/unread") and len(parts) == 2 and parts[1].isdigit():
         title = store.mark_read(chat_id, int(parts[1]), command == "/read"); bot.send(chat_id, f"Marked “{title}” as {'read' if command == '/read' else 'unread'}" if title else "I couldn’t find that book number."); return
     if command == "/rate" and len(parts) == 3 and parts[1].isdigit() and parts[2].isdigit() and 1 <= int(parts[2]) <= 10:
         title = store.rate(chat_id, int(parts[1]), int(parts[2])); bot.send(chat_id, f"Rated “{title}” {parts[2]}/10." if title else "I couldn’t find that book number."); return
+    if command == "/info" and len(parts) == 2 and parts[1].isdigit():
+        send_book_detail(bot, store, chat_id, int(parts[1])); return
+    if command == "/remove" and len(parts) == 2 and parts[1].isdigit():
+        title = store.remove(chat_id, int(parts[1])); bot.send(chat_id, f"Removed “{title}”." if title else "I couldn’t find that book number."); return
+    if command == "/edit" and len(parts) >= 3 and parts[1].isdigit():
+        title = text_entry_title(" ".join(parts[2:])); edited = store.edit(chat_id, int(parts[1]), title) if title else None; bot.send(chat_id, f"Renamed the book to “{edited}”." if edited else "I couldn’t edit that book. Check the number and title, or it may already be on your list."); return
+    if command == "/search" and len(parts) >= 2:
+        books = store.list(chat_id, query_text=" ".join(parts[1:])); bot.send(chat_id, "Search results:\n" + "\n".join(f"{i}. {book_label(book)}" for i, book in enumerate(books, 1)) if books else "No matching books."); return
+    if command == "/tag" and len(parts) == 2:
+        books = store.list(chat_id, tag=parts[1].lstrip("#")); bot.send(chat_id, "Tagged books:\n" + "\n".join(f"{i}. {book_label(book)}" for i, book in enumerate(books, 1)) if books else "No books have that tag."); return
     if command == "/tag" and len(parts) >= 3 and parts[1].isdigit():
         tag, title = " ".join(parts[2:]).lstrip("#"), store.tag(chat_id, int(parts[1]), " ".join(parts[2:]).lstrip("#")); bot.send(chat_id, f"Added #{tag.replace(' ', '_')} to “{title}”." if title else "I couldn’t find that book number."); return
+    if command == "/stats": bot.send(chat_id, stats_text(store, chat_id)); return
+    if command == "/group": bot.send(chat_id, "In a Telegram group, every member uses the same shared book list for that group. In a private chat, your list stays private."); return
     if command == "/clear": store.clear(chat_id); bot.send(chat_id, "Cleared your book list."); return
     if command == "/add":
         title = text_entry_title(" ".join(parts[1:]))

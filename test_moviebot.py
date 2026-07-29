@@ -60,6 +60,13 @@ class ExtractionTests(unittest.TestCase):
         self.assertEqual(text_entry_title("Lady Bird #favorite"), "Lady Bird")
         self.assertIsNone(text_entry_title("&"))
 
+    def test_details_and_statistics_keep_provider_metadata(self):
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3") as database:
+            store = Store(database.name)
+            store.add(1, [{"title": "Lady Bird", "year": 2017, "tmdb_id": 391713, "overview": "A coming-of-age story.", "poster_url": "https://example.com/poster.jpg", "online_rating": 7.3, "tags": ["favorite"]}])
+            self.assertEqual(store.details(1, 1)["overview"], "A coming-of-age story.")
+            self.assertEqual(store.stats(1)[:2], (1, 0))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -35,6 +35,11 @@ Commands:
 - `/rate 3 8` — rate movie 3 from 1–10 and mark it seen
 - `/add Lady Bird` — add a movie by title (or simply send `Lady Bird`)
 - `/tag 3 favorite` — add a tag to movie 3
+- `/tag favorite` or `/search dune` — filter/search your list
+- `/info 3` — show a poster, description, and TMDb community rating
+- `/remove 3` or `/edit 3 New Title` — manage a saved movie
+- `/stats` — show totals, watch progress, ratings, and top tags
+- `/group` — explain shared lists in Telegram groups
 - `/clear` — remove all movies
 - `/status` — show which vision providers are configured (never shows keys)
 - `/menu` — show an interactive menu of common actions
@@ -74,6 +79,8 @@ The first version uses line-based OCR heuristics. Screenshots with several unrel
 ## CineShelf: the book bot
 
 `bookbot.py` is a separate Telegram bot for books. It detects titles from screenshots and captions, lets a user select multiple detected titles, searches Google Books for the title/author/publication year, saves tags, prevents duplicates, and tracks books read, unread, and rated.
+
+Both bots keep lists per Telegram chat. Add either bot to a group and that group automatically gets its own shared list; members can add, remove, tag, and rate items together. `/list` now includes selectable entries that open a poster/cover, short description, and public aggregate rating from TMDb or Google Books.
 
 Create a second bot in BotFather, then deploy a second Railway service from the same GitHub repository. Set its **Dockerfile Path** to `Dockerfile.book`, attach a separate `/data` volume, and add:
 

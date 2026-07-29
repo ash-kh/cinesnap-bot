@@ -118,6 +118,9 @@ class Store:
             year INTEGER,
             tags TEXT NOT NULL DEFAULT '[]',
             tmdb_id INTEGER,
+            overview TEXT,
+            poster_url TEXT,
+            online_rating REAL,
             PRIMARY KEY (chat_id, title_key)
         )""")
         columns = {row[1] for row in self.db.execute("PRAGMA table_info(movies)")}
@@ -131,6 +134,9 @@ class Store:
             self.db.execute("ALTER TABLE movies ADD COLUMN tags TEXT NOT NULL DEFAULT '[]'")
         if "tmdb_id" not in columns:
             self.db.execute("ALTER TABLE movies ADD COLUMN tmdb_id INTEGER")
+        for name, definition in (("overview", "TEXT"), ("poster_url", "TEXT"), ("online_rating", "REAL")):
+            if name not in columns:
+                self.db.execute(f"ALTER TABLE movies ADD COLUMN {name} {definition}")
         self.db.execute("""CREATE TABLE IF NOT EXISTS pending_choices (
             token TEXT PRIMARY KEY, chat_id INTEGER NOT NULL, titles TEXT NOT NULL,
             created_at INTEGER NOT NULL, kind TEXT NOT NULL DEFAULT 'title',
@@ -155,8 +161,8 @@ class Store:
             if self.is_duplicate(chat_id, movie):
                 continue
             cur = self.db.execute(
-                "INSERT OR IGNORE INTO movies (chat_id, title, title_key, added_at, year, tags, tmdb_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (chat_id, title, key, int(time.time()), year, json.dumps(tags), movie.get("tmdb_id")),
+                "INSERT OR IGNORE INTO movies (chat_id, title, title_key, added_at, year, tags, tmdb_id, overview, poster_url, online_rating) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (chat_id, title, key, int(time.time()), year, json.dumps(tags), movie.get("tmdb_id"), movie.get("overview"), movie.get("poster_url"), movie.get("online_rating")),
             )
             if cur.rowcount:
                 added.append(movie_label(movie))
@@ -177,17 +183,25 @@ class Store:
             (chat_id, title, year, year),
         ).fetchone())
 
-    def list(self, chat_id: int, seen: bool | None = None) -> list[dict]:
-        query = "SELECT title, year, rating, tags, tmdb_id FROM movies WHERE chat_id = ?"
+    def list(self, chat_id: int, seen: bool | None = None, query_text: str | None = None, tag: str | None = None) -> list[dict]:
+        query = "SELECT title, year, rating, tags, tmdb_id, overview, poster_url, online_rating FROM movies WHERE chat_id = ?"
         params: list[object] = [chat_id]
         if seen is not None:
             query += " AND seen = ?"
             params.append(int(seen))
+        if query_text:
+            query += " AND lower(title) LIKE ?"
+            params.append(f"%{query_text.casefold()}%")
         query += " ORDER BY added_at, title_key"
         return [
-            {"title": row[0], "year": row[1], "rating": row[2], "tags": json.loads(row[3] or "[]"), "tmdb_id": row[4]}
+            {"title": row[0], "year": row[1], "rating": row[2], "tags": json.loads(row[3] or "[]"), "tmdb_id": row[4], "overview": row[5], "poster_url": row[6], "online_rating": row[7]}
             for row in self.db.execute(query, params)
+            if not tag or tag.casefold() in {item.casefold() for item in json.loads(row[3] or "[]")}
         ]
+
+    def details(self, chat_id: int, index: int) -> dict | None:
+        rows = self.list(chat_id)
+        return rows[index - 1] if 1 <= index <= len(rows) else None
 
     def get_by_index(self, chat_id: int, index: int) -> tuple[str, str] | None:
         row = self.db.execute(
@@ -226,6 +240,29 @@ class Store:
             self.db.execute("UPDATE movies SET tags = ? WHERE chat_id = ? AND title_key = ?", (json.dumps(tags), chat_id, key))
             self.db.commit()
         return title
+
+    def remove(self, chat_id: int, index: int) -> str | None:
+        movie = self.get_by_index(chat_id, index)
+        if not movie:
+            return None
+        self.db.execute("DELETE FROM movies WHERE chat_id = ? AND title_key = ?", (chat_id, movie[1]))
+        self.db.commit()
+        return movie[0]
+
+    def edit(self, chat_id: int, index: int, title: str) -> str | None:
+        movie = self.get_by_index(chat_id, index)
+        if not movie or self.is_duplicate(chat_id, {"title": title}):
+            return None
+        key = f"{title.casefold()}:"
+        self.db.execute("UPDATE movies SET title = ?, title_key = ?, year = NULL, tmdb_id = NULL, overview = NULL, poster_url = NULL, online_rating = NULL WHERE chat_id = ? AND title_key = ?", (title, key, chat_id, movie[1]))
+        self.db.commit()
+        return title
+
+    def stats(self, chat_id: int) -> tuple[int, int, float | None, list[str]]:
+        total, seen, average = self.db.execute("SELECT count(*), sum(seen), avg(rating) FROM movies WHERE chat_id = ?", (chat_id,)).fetchone()
+        tags = [tag for row in self.db.execute("SELECT tags FROM movies WHERE chat_id = ?", (chat_id,)) for tag in json.loads(row[0] or "[]")]
+        top = sorted(set(tags), key=lambda item: (-sum(tag.casefold() == item.casefold() for tag in tags), item.casefold()))[:3]
+        return total, seen or 0, average, top
 
     def pending(self, chat_id: int, items: list[dict], kind: str, tags: list[str]) -> str:
         token = uuid.uuid4().hex[:12]
@@ -296,6 +333,9 @@ class Telegram:
             params["reply_markup"] = json.dumps(reply_markup)
         self.call("sendMessage", **params)
 
+    def send_photo(self, chat_id: int, photo: str, caption: str) -> None:
+        self.call("sendPhoto", chat_id=chat_id, photo=photo, caption=caption[:1024])
+
     def send_menu(self, chat_id: int, text: str = "Choose an option:") -> None:
         self.send(chat_id, text, {"inline_keyboard": [
             [{"text": "🎬 All movies", "callback_data": "menu:list"},
@@ -314,6 +354,12 @@ class Telegram:
             {"command": "seen", "description": "Show movies seen"},
             {"command": "rate", "description": "Rate a movie: /rate 3 8"},
             {"command": "add", "description": "Add a movie by title"},
+            {"command": "remove", "description": "Remove a movie: /remove 3"},
+            {"command": "edit", "description": "Rename a movie: /edit 3 Title"},
+            {"command": "search", "description": "Search your movies"},
+            {"command": "stats", "description": "Show list statistics"},
+            {"command": "info", "description": "Show movie details: /info 3"},
+            {"command": "group", "description": "Explain shared group lists"},
             {"command": "status", "description": "Check vision providers"},
             {"command": "clear", "description": "Clear your movie list"},
             {"command": "help", "description": "Show instructions"},
@@ -411,7 +457,12 @@ def tmdb_matches(title: str) -> list[dict]:
             if not name:
                 continue
             date = result.get("release_date") or ""
-            matches.append({"title": name, "year": int(date[:4]) if date[:4].isdigit() else None, "tmdb_id": result.get("id")})
+            poster = result.get("poster_path")
+            matches.append({
+                "title": name, "year": int(date[:4]) if date[:4].isdigit() else None, "tmdb_id": result.get("id"),
+                "overview": result.get("overview") or "", "poster_url": f"https://image.tmdb.org/t/p/w500{poster}" if poster else None,
+                "online_rating": result.get("vote_average"),
+            })
         return matches
     except Exception:
         LOG.exception("TMDb search failed for %r; saving without a TMDb match", title)
@@ -599,6 +650,47 @@ def list_text(store: Store, chat_id: int, seen: bool | None = None) -> str:
     )
 
 
+def send_movie_list(bot: Telegram, store: Store, chat_id: int, seen: bool | None = None) -> None:
+    bot.send(chat_id, list_text(store, chat_id, seen))
+    # Item numbers in the full list are stable and can open a poster/details view.
+    if seen is None:
+        rows = store.list(chat_id)
+        if rows:
+            keyboard = [[{"text": f"ℹ️ {i}. {row['title'][:34]}", "callback_data": f"info:{i}"}] for i, row in enumerate(rows[:20], 1)]
+            bot.send(chat_id, "Select a movie for its poster, description, and rating:", {"inline_keyboard": keyboard})
+
+
+def movie_detail_text(movie: dict) -> str:
+    lines = [movie_label(movie)]
+    if movie.get("online_rating") is not None:
+        lines.append(f"TMDb community rating: {float(movie['online_rating']):.1f}/10")
+    if movie.get("overview"):
+        lines.append(movie["overview"])
+    return "\n\n".join(lines)
+
+
+def send_movie_detail(bot: Telegram, store: Store, chat_id: int, index: int) -> None:
+    movie = store.details(chat_id, index)
+    if not movie:
+        bot.send(chat_id, "I couldn’t find that movie number. Use /list first.")
+        return
+    text = movie_detail_text(movie)
+    if movie.get("poster_url"):
+        try:
+            bot.send_photo(chat_id, movie["poster_url"], text)
+            return
+        except Exception:
+            LOG.exception("Could not send TMDb poster")
+    bot.send(chat_id, text)
+
+
+def stats_text(store: Store, chat_id: int) -> str:
+    total, seen, average, tags = store.stats(chat_id)
+    if not total:
+        return "No movie statistics yet."
+    return f"Movie stats:\nTotal: {total}\nSeen: {seen}\nNot seen: {total - seen}" + (f"\nYour average rating: {average:.1f}/10" if average is not None else "") + (f"\nTop tags: {', '.join('#' + tag.replace(' ', '_') for tag in tags)}" if tags else "")
+
+
 def provider_status_text() -> str:
     return ("Vision providers configured:\n"
             f"Gemini: {'yes' if os.getenv('GEMINI_API_KEY') else 'no'}\n"
@@ -614,6 +706,9 @@ def help_text() -> str:
             "/rate <number> <1-10> — rate and mark seen\n/status — check vision providers\n"
             "/add <movie title> — add a movie by typing its title\n"
             "/tag <number> <tag> — add a tag to a movie\n"
+            "/tag <tag> — filter by a tag\n/search <words> — search your list\n"
+            "/info <number> — poster, description, and online rating\n"
+            "/remove <number> — remove a movie\n/edit <number> <title> — rename a movie\n/stats — list statistics\n/group — shared-list help\n"
             "/clear — clear your list\n/menu — show these buttons")
 
 
@@ -628,9 +723,13 @@ def handle_callback(bot: Telegram, store: Store, callback: dict) -> None:
     if chat_id is None or ":" not in data:
         return
     action, token, *rest = data.split(":")
+    if action == "info" and token.isdigit():
+        send_movie_detail(bot, store, chat_id, int(token))
+        bot.answer_callback(callback["id"], "Opening movie details.")
+        return
     if action == "menu":
         if token == "list":
-            bot.send(chat_id, list_text(store, chat_id))
+            send_movie_list(bot, store, chat_id)
         elif token == "seen":
             bot.send(chat_id, list_text(store, chat_id, True))
         elif token == "unseen":
@@ -719,7 +818,7 @@ def handle(bot: Telegram, store: Store, message: dict) -> None:
     parts = command_parts(text)
     command = parts[0].split("@", 1)[0] if parts else ""
     if command == "/list":
-        bot.send(chat_id, list_text(store, chat_id))
+        send_movie_list(bot, store, chat_id)
         return
     if command == "/seen" and len(parts) == 1:
         bot.send(chat_id, list_text(store, chat_id, True))
@@ -735,6 +834,26 @@ def handle(bot: Telegram, store: Store, message: dict) -> None:
         title = store.rate(chat_id, int(parts[1]), int(parts[2]))
         bot.send(chat_id, f"Rated “{title}” {parts[2]}/10 and marked it seen." if title else "I couldn’t find that movie number. Use /list first.")
         return
+    if command == "/info" and len(parts) == 2 and parts[1].isdigit():
+        send_movie_detail(bot, store, chat_id, int(parts[1]))
+        return
+    if command == "/remove" and len(parts) == 2 and parts[1].isdigit():
+        title = store.remove(chat_id, int(parts[1]))
+        bot.send(chat_id, f"Removed “{title}”." if title else "I couldn’t find that movie number. Use /list first.")
+        return
+    if command == "/edit" and len(parts) >= 3 and parts[1].isdigit():
+        title = text_entry_title(" ".join(parts[2:]))
+        edited = store.edit(chat_id, int(parts[1]), title) if title else None
+        bot.send(chat_id, f"Renamed the movie to “{edited}”." if edited else "I couldn’t edit that movie. Check the number and title, or it may already be on your list.")
+        return
+    if command == "/search" and len(parts) >= 2:
+        rows = store.list(chat_id, query_text=" ".join(parts[1:]))
+        bot.send(chat_id, "Search results:\n" + "\n".join(f"{i}. {movie_label(row)}" for i, row in enumerate(rows, 1)) if rows else "No matching movies.")
+        return
+    if command == "/tag" and len(parts) == 2:
+        rows = store.list(chat_id, tag=parts[1].lstrip("#"))
+        bot.send(chat_id, "Tagged movies:\n" + "\n".join(f"{i}. {movie_label(row)}" for i, row in enumerate(rows, 1)) if rows else "No movies have that tag.")
+        return
     if command == "/tag" and len(parts) >= 3 and parts[1].isdigit():
         tag = " ".join(parts[2:]).lstrip("#").strip()
         if not tag:
@@ -742,6 +861,12 @@ def handle(bot: Telegram, store: Store, message: dict) -> None:
             return
         title = store.tag(chat_id, int(parts[1]), tag)
         bot.send(chat_id, f"Added #{tag.replace(' ', '_')} to “{title}”." if title else "I couldn’t find that movie number. Use /list first.")
+        return
+    if command == "/stats":
+        bot.send(chat_id, stats_text(store, chat_id))
+        return
+    if command == "/group":
+        bot.send(chat_id, "In a Telegram group, every member uses the same shared movie list for that group. In a private chat, your list stays private.")
         return
     if command == "/clear":
         store.clear(chat_id)
