@@ -143,6 +143,8 @@ class Store:
             year = movie.get("year")
             key = f"{title.casefold()}:{year or ''}"
             tags = sorted(set(movie.get("tags", [])), key=str.casefold)
+            if self.is_duplicate(chat_id, movie):
+                continue
             cur = self.db.execute(
                 "INSERT OR IGNORE INTO movies (chat_id, title, title_key, added_at, year, tags, tmdb_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (chat_id, title, key, int(time.time()), year, json.dumps(tags), movie.get("tmdb_id")),
@@ -151,6 +153,20 @@ class Store:
                 added.append(movie_label(movie))
         self.db.commit()
         return added
+
+    def is_duplicate(self, chat_id: int, movie: dict) -> bool:
+        """Treat the same TMDb item, or the same title/year, as a duplicate."""
+        tmdb_id = movie.get("tmdb_id")
+        if tmdb_id is not None:
+            return bool(self.db.execute(
+                "SELECT 1 FROM movies WHERE chat_id = ? AND tmdb_id = ? LIMIT 1", (chat_id, tmdb_id)
+            ).fetchone())
+        title = movie["title"].casefold()
+        year = movie.get("year")
+        return bool(self.db.execute(
+            "SELECT 1 FROM movies WHERE chat_id = ? AND lower(title) = ? AND (year = ? OR year IS NULL OR ? IS NULL) LIMIT 1",
+            (chat_id, title, year, year),
+        ).fetchone())
 
     def list(self, chat_id: int, seen: bool | None = None) -> list[dict]:
         query = "SELECT title, year, rating, tags, tmdb_id FROM movies WHERE chat_id = ?"
@@ -432,14 +448,14 @@ def ocr(path: str) -> str:
         return "\n".join(outputs)
 
 
-def vision_titles(path: str, caption: str = "") -> list[str]:
+def vision_titles(path: str, caption: str = "", subject: str = "movie") -> list[str]:
     """Use an optional vision model when local OCR cannot read the screenshot."""
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
         return []
     image_data = base64.b64encode(Path(path).read_bytes()).decode("ascii")
     prompt = (
-        "Identify movie titles visible in this screenshot. Ignore the phone status bar, "
+        f"Identify {subject} titles visible in this screenshot. Ignore the phone status bar, "
         "social-media usernames, buttons, likes, comments, captions, actor names, "
         "directors, years, and descriptions. Return only likely movie titles, one per "
         "line, with no bullets or explanation. If there is no confident movie title, "
@@ -477,14 +493,14 @@ def vision_titles(path: str, caption: str = "") -> list[str]:
         return []
 
 
-def grok_titles(path: str, caption: str = "") -> list[str]:
+def grok_titles(path: str, caption: str = "", subject: str = "movie") -> list[str]:
     """Use xAI's OpenAI-compatible image understanding endpoint."""
     api_key = os.getenv("XAI_API_KEY")
     if not api_key:
         return []
     image_data = base64.b64encode(Path(path).read_bytes()).decode("ascii")
     prompt = (
-        "Identify movie titles visible in this screenshot. Ignore phone status bars, "
+        f"Identify {subject} titles visible in this screenshot. Ignore phone status bars, "
         "social-media usernames, buttons, likes, comments, captions, actors, directors, "
         "years, and descriptions. If multiple distinct movie titles are visible, return "
         "every one. Return only likely movie titles, one per line, with no bullets or "
@@ -520,14 +536,14 @@ def grok_titles(path: str, caption: str = "") -> list[str]:
         return []
 
 
-def gemini_titles(path: str, caption: str = "") -> list[str]:
+def gemini_titles(path: str, caption: str = "", subject: str = "movie") -> list[str]:
     """Use Google's Gemini image understanding endpoint."""
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
         return []
     image_data = base64.b64encode(Path(path).read_bytes()).decode("ascii")
     prompt = (
-        "Identify movie titles visible in this screenshot. Ignore phone status bars, "
+        f"Identify {subject} titles visible in this screenshot. Ignore phone status bars, "
         "social-media usernames, buttons, likes, comments, captions, actors, directors, "
         "years, and descriptions. If multiple distinct movie titles are visible, return "
         "every one. Return only likely movie titles, one per line, with no bullets or "

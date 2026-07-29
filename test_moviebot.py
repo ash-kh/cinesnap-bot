@@ -2,6 +2,7 @@ import tempfile
 import unittest
 
 from moviebot import Store, caption_tags, clean_title, extract_titles, unique_titles
+from bookbot import BookStore
 
 
 class ExtractionTests(unittest.TestCase):
@@ -42,6 +43,18 @@ class ExtractionTests(unittest.TestCase):
             store.add(1, [{"title": "Lady Bird", "year": 2017, "tags": ["favorite"]}])
             self.assertEqual(store.list(1)[0]["year"], 2017)
             self.assertEqual(store.list(1)[0]["tags"], ["favorite"])
+
+    def test_prevents_tmdb_and_book_id_duplicates(self):
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3") as database:
+            store = Store(database.name)
+            first = {"title": "Dune", "year": 2021, "tmdb_id": 438631}
+            self.assertEqual(len(store.add(1, [first])), 1)
+            self.assertTrue(store.is_duplicate(1, {"title": "Dune", "year": 2021, "tmdb_id": 438631}))
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3") as database:
+            store = BookStore(database.name)
+            book = {"title": "Dune", "authors": "Frank Herbert", "year": 1965, "book_id": "abc"}
+            self.assertEqual(len(store.add(1, [book])), 1)
+            self.assertEqual(store.add(1, [book]), [])
 
 
 if __name__ == "__main__":

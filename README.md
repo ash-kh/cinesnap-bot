@@ -69,3 +69,18 @@ For continuous uptime, run it with `systemd`, `supervisord`, or `tmux`, and back
 ## Limitations
 
 The first version uses line-based OCR heuristics. Screenshots with several unrelated text elements may need a crop or manual cleanup. The next upgrade could add an approval step, movie database matching, or an LLM vision fallback for harder screenshots.
+
+## CineShelf: the book bot
+
+`bookbot.py` is a separate Telegram bot for books. It detects titles from screenshots and captions, lets a user select multiple detected titles, searches Google Books for the title/author/publication year, saves tags, prevents duplicates, and tracks books read, unread, and rated.
+
+Create a second bot in BotFather, then deploy a second Railway service from the same GitHub repository. Set its **Dockerfile Path** to `Dockerfile.book`, attach a separate `/data` volume, and add:
+
+```text
+CINESNAP_BOOK_TELEGRAM_TOKEN=the-token-for-your-book-bot
+BOOK_DB=/data/books.sqlite3
+GEMINI_API_KEY=the-same-key-used-by-CineSnap
+GOOGLE_BOOKS_API_KEY=an-API-key-enabled-for-Google-Books
+```
+
+It can also use the existing optional `XAI_API_KEY` and `OPENAI_API_KEY` fallbacks. Google Books matching uses its public volume search API; add `GOOGLE_BOOKS_API_KEY` to identify the service and avoid unauthenticated quota limits.
