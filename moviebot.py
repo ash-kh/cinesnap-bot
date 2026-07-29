@@ -356,8 +356,9 @@ def grok_titles(path: str, caption: str = "") -> list[str]:
     prompt = (
         "Identify movie titles visible in this screenshot. Ignore phone status bars, "
         "social-media usernames, buttons, likes, comments, captions, actors, directors, "
-        "years, and descriptions. Return only likely movie titles, one per line, with "
-        "no bullets or explanation. Return an empty response if uncertain."
+        "years, and descriptions. If multiple distinct movie titles are visible, return "
+        "every one. Return only likely movie titles, one per line, with no bullets or "
+        "explanation. Return an empty response if uncertain."
     )
     if caption:
         prompt += f"\nThe Telegram caption was: {caption[:2000]}"
@@ -398,8 +399,9 @@ def gemini_titles(path: str, caption: str = "") -> list[str]:
     prompt = (
         "Identify movie titles visible in this screenshot. Ignore phone status bars, "
         "social-media usernames, buttons, likes, comments, captions, actors, directors, "
-        "years, and descriptions. Return only likely movie titles, one per line, with "
-        "no bullets or explanation. Return an empty response if uncertain."
+        "years, and descriptions. If multiple distinct movie titles are visible, return "
+        "every one. Return only likely movie titles, one per line, with no bullets or "
+        "explanation. Return an empty response if uncertain."
     )
     if caption:
         prompt += f"\nThe Telegram caption was: {caption[:2000]}"
