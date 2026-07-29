@@ -1,6 +1,7 @@
+import tempfile
 import unittest
 
-from moviebot import clean_title, extract_titles, unique_titles
+from moviebot import Store, caption_tags, clean_title, extract_titles, unique_titles
 
 
 class ExtractionTests(unittest.TestCase):
@@ -24,6 +25,23 @@ class ExtractionTests(unittest.TestCase):
             unique_titles(extract_titles("Lady Bird"), extract_titles("Lady Bird\nThe Matrix")),
             ["Lady Bird", "The Matrix"],
         )
+
+    def test_caption_tags_and_pending_multi_select(self):
+        self.assertEqual(caption_tags("Watch this #coming_of_age #Favorite"), ["coming of age", "Favorite"])
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3") as database:
+            store = Store(database.name)
+            token = store.pending(1, [{"title": "Lady Bird"}, {"title": "Moonlight"}], "title", ["favorite"])
+            pending = store.toggle_pending(1, token, 1)
+            self.assertEqual(pending["selected"], [1])
+            chosen = store.take_pending(1, token)
+            self.assertEqual(chosen["items"], [{"title": "Moonlight"}])
+
+    def test_stores_year_and_tags(self):
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3") as database:
+            store = Store(database.name)
+            store.add(1, [{"title": "Lady Bird", "year": 2017, "tags": ["favorite"]}])
+            self.assertEqual(store.list(1)[0]["year"], 2017)
+            self.assertEqual(store.list(1)[0]["tags"], ["favorite"])
 
 
 if __name__ == "__main__":

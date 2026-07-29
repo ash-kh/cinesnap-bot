@@ -106,6 +106,9 @@ class Store:
             added_at INTEGER NOT NULL,
             seen INTEGER NOT NULL DEFAULT 0,
             rating INTEGER,
+            year INTEGER,
+            tags TEXT NOT NULL DEFAULT '[]',
+            tmdb_id INTEGER,
             PRIMARY KEY (chat_id, title_key)
         )""")
         columns = {row[1] for row in self.db.execute("PRAGMA table_info(movies)")}
@@ -113,68 +116,134 @@ class Store:
             self.db.execute("ALTER TABLE movies ADD COLUMN seen INTEGER NOT NULL DEFAULT 0")
         if "rating" not in columns:
             self.db.execute("ALTER TABLE movies ADD COLUMN rating INTEGER")
+        if "year" not in columns:
+            self.db.execute("ALTER TABLE movies ADD COLUMN year INTEGER")
+        if "tags" not in columns:
+            self.db.execute("ALTER TABLE movies ADD COLUMN tags TEXT NOT NULL DEFAULT '[]'")
+        if "tmdb_id" not in columns:
+            self.db.execute("ALTER TABLE movies ADD COLUMN tmdb_id INTEGER")
         self.db.execute("""CREATE TABLE IF NOT EXISTS pending_choices (
             token TEXT PRIMARY KEY, chat_id INTEGER NOT NULL, titles TEXT NOT NULL,
-            created_at INTEGER NOT NULL
+            created_at INTEGER NOT NULL, kind TEXT NOT NULL DEFAULT 'title',
+            selected TEXT NOT NULL DEFAULT '[]', tags TEXT NOT NULL DEFAULT '[]'
         )""")
+        pending_columns = {row[1] for row in self.db.execute("PRAGMA table_info(pending_choices)")}
+        if "kind" not in pending_columns:
+            self.db.execute("ALTER TABLE pending_choices ADD COLUMN kind TEXT NOT NULL DEFAULT 'title'")
+        if "selected" not in pending_columns:
+            self.db.execute("ALTER TABLE pending_choices ADD COLUMN selected TEXT NOT NULL DEFAULT '[]'")
+        if "tags" not in pending_columns:
+            self.db.execute("ALTER TABLE pending_choices ADD COLUMN tags TEXT NOT NULL DEFAULT '[]'")
         self.db.commit()
 
-    def add(self, chat_id: int, titles: list[str]) -> list[str]:
+    def add(self, chat_id: int, movies: list[dict]) -> list[str]:
         added = []
-        for title in titles:
-            key = title.casefold()
+        for movie in movies:
+            title = movie["title"]
+            year = movie.get("year")
+            key = f"{title.casefold()}:{year or ''}"
+            tags = sorted(set(movie.get("tags", [])), key=str.casefold)
             cur = self.db.execute(
-                "INSERT OR IGNORE INTO movies (chat_id, title, title_key, added_at) VALUES (?, ?, ?, ?)",
-                (chat_id, title, key, int(time.time())),
+                "INSERT OR IGNORE INTO movies (chat_id, title, title_key, added_at, year, tags, tmdb_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (chat_id, title, key, int(time.time()), year, json.dumps(tags), movie.get("tmdb_id")),
             )
             if cur.rowcount:
-                added.append(title)
+                added.append(movie_label(movie))
         self.db.commit()
         return added
 
-    def list(self, chat_id: int, seen: bool | None = None) -> list[tuple[str, int | None]]:
-        query = "SELECT title, rating FROM movies WHERE chat_id = ?"
+    def list(self, chat_id: int, seen: bool | None = None) -> list[dict]:
+        query = "SELECT title, year, rating, tags, tmdb_id FROM movies WHERE chat_id = ?"
         params: list[object] = [chat_id]
         if seen is not None:
             query += " AND seen = ?"
             params.append(int(seen))
         query += " ORDER BY added_at, title_key"
-        return list(self.db.execute(query, params))
+        return [
+            {"title": row[0], "year": row[1], "rating": row[2], "tags": json.loads(row[3] or "[]"), "tmdb_id": row[4]}
+            for row in self.db.execute(query, params)
+        ]
 
-    def get_by_index(self, chat_id: int, index: int) -> str | None:
+    def get_by_index(self, chat_id: int, index: int) -> tuple[str, str] | None:
         row = self.db.execute(
-            "SELECT title FROM movies WHERE chat_id = ? ORDER BY added_at, title_key LIMIT 1 OFFSET ?",
+            "SELECT title, title_key FROM movies WHERE chat_id = ? ORDER BY added_at, title_key LIMIT 1 OFFSET ?",
             (chat_id, index - 1),
         ).fetchone()
-        return row[0] if row else None
+        return (row[0], row[1]) if row else None
 
     def mark_seen(self, chat_id: int, index: int, value: bool) -> str | None:
-        title = self.get_by_index(chat_id, index)
-        if title:
-            self.db.execute("UPDATE movies SET seen = ? WHERE chat_id = ? AND title_key = ?", (int(value), chat_id, title.casefold()))
+        movie = self.get_by_index(chat_id, index)
+        if movie:
+            title, key = movie
+            self.db.execute("UPDATE movies SET seen = ? WHERE chat_id = ? AND title_key = ?", (int(value), chat_id, key))
             self.db.commit()
-        return title
+            return title
+        return None
 
     def rate(self, chat_id: int, index: int, rating: int) -> str | None:
-        title = self.get_by_index(chat_id, index)
-        if title:
-            self.db.execute("UPDATE movies SET rating = ?, seen = 1 WHERE chat_id = ? AND title_key = ?", (rating, chat_id, title.casefold()))
+        movie = self.get_by_index(chat_id, index)
+        if movie:
+            title, key = movie
+            self.db.execute("UPDATE movies SET rating = ?, seen = 1 WHERE chat_id = ? AND title_key = ?", (rating, chat_id, key))
+            self.db.commit()
+            return title
+        return None
+
+    def tag(self, chat_id: int, index: int, tag: str) -> str | None:
+        movie = self.get_by_index(chat_id, index)
+        if not movie:
+            return None
+        title, key = movie
+        row = self.db.execute("SELECT tags FROM movies WHERE chat_id = ? AND title_key = ?", (chat_id, key)).fetchone()
+        tags = json.loads(row[0] or "[]")
+        if tag.casefold() not in {item.casefold() for item in tags}:
+            tags.append(tag)
+            self.db.execute("UPDATE movies SET tags = ? WHERE chat_id = ? AND title_key = ?", (json.dumps(tags), chat_id, key))
             self.db.commit()
         return title
 
-    def pending(self, chat_id: int, titles: list[str]) -> str:
+    def pending(self, chat_id: int, items: list[dict], kind: str, tags: list[str]) -> str:
         token = uuid.uuid4().hex[:12]
-        self.db.execute("INSERT INTO pending_choices VALUES (?, ?, ?, ?)", (token, chat_id, json.dumps(titles), int(time.time())))
+        self.db.execute(
+            "INSERT INTO pending_choices (token, chat_id, titles, created_at, kind, selected, tags) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (token, chat_id, json.dumps(items), int(time.time()), kind, "[]", json.dumps(tags)),
+        )
         self.db.commit()
         return token
 
-    def take_pending(self, chat_id: int, token: str) -> list[str] | None:
-        row = self.db.execute("SELECT titles FROM pending_choices WHERE token = ? AND chat_id = ?", (token, chat_id)).fetchone()
+    def pending_data(self, chat_id: int, token: str) -> dict | None:
+        row = self.db.execute("SELECT titles, kind, selected, tags FROM pending_choices WHERE token = ? AND chat_id = ?", (token, chat_id)).fetchone()
         if not row:
+            return None
+        return {"items": json.loads(row[0]), "kind": row[1], "selected": json.loads(row[2]), "tags": json.loads(row[3])}
+
+    def toggle_pending(self, chat_id: int, token: str, index: int) -> dict | None:
+        pending = self.pending_data(chat_id, token)
+        if not pending or not 0 <= index < len(pending["items"]):
+            return None
+        selected = set(pending["selected"])
+        if index in selected:
+            selected.remove(index)
+        else:
+            selected.add(index)
+        self.db.execute("UPDATE pending_choices SET selected = ? WHERE token = ?", (json.dumps(sorted(selected)), token))
+        self.db.commit()
+        pending["selected"] = sorted(selected)
+        return pending
+
+    def take_pending(self, chat_id: int, token: str, selected_only: bool = True) -> dict | None:
+        pending = self.pending_data(chat_id, token)
+        if not pending:
             return None
         self.db.execute("DELETE FROM pending_choices WHERE token = ?", (token,))
         self.db.commit()
-        return json.loads(row[0])
+        if selected_only:
+            pending["items"] = [pending["items"][i] for i in pending["selected"]]
+        return pending
+
+    def discard_pending(self, chat_id: int, token: str) -> None:
+        self.db.execute("DELETE FROM pending_choices WHERE token = ? AND chat_id = ?", (token, chat_id))
+        self.db.commit()
 
     def count(self, chat_id: int) -> int:
         return self.db.execute("SELECT COUNT(*) FROM movies WHERE chat_id = ?", (chat_id,)).fetchone()[0]
@@ -226,10 +295,28 @@ class Telegram:
         self.call("setMyCommands", commands=json.dumps(commands))
         self.call("setChatMenuButton", menu_button=json.dumps({"type": "commands"}))
 
-    def send_choices(self, chat_id: int, token: str, titles: list[str]) -> None:
-        keyboard = [[{"text": title, "callback_data": f"pick:{token}:{i}"}] for i, title in enumerate(titles)]
-        keyboard.append([{"text": "Add all", "callback_data": f"pickall:{token}"}])
-        self.call("sendMessage", chat_id=chat_id, text="I found several possible movie titles. Which one should I add?", reply_markup=json.dumps({"inline_keyboard": keyboard}))
+    def choice_markup(self, token: str, pending: dict) -> dict:
+        selected = set(pending["selected"])
+        keyboard = []
+        for index, item in enumerate(pending["items"]):
+            text = movie_label(item) if pending["kind"] == "movie" else item["title"]
+            keyboard.append([{"text": f"{'✅' if index in selected else '☐'} {text}", "callback_data": f"toggle:{token}:{index}"}])
+        keyboard.append([
+            {"text": "Add selected", "callback_data": f"confirm:{token}"},
+            {"text": "Add all", "callback_data": f"all:{token}"},
+        ])
+        keyboard.append([{"text": "Cancel", "callback_data": f"cancel:{token}"}])
+        return {"inline_keyboard": keyboard}
+
+    def send_choices(self, chat_id: int, token: str, pending: dict) -> None:
+        if pending["kind"] == "movie":
+            text = "TMDb found more than one matching movie. Select the version(s) you want to save:"
+        else:
+            text = "I found several possible movie titles. Select one or more to add:"
+        self.call("sendMessage", chat_id=chat_id, text=text, reply_markup=json.dumps(self.choice_markup(token, pending)))
+
+    def edit_choices(self, chat_id: int, message_id: int, token: str, pending: dict) -> None:
+        self.call("editMessageReplyMarkup", chat_id=chat_id, message_id=message_id, reply_markup=json.dumps(self.choice_markup(token, pending)))
 
     def answer_callback(self, callback_id: str, text: str) -> None:
         self.call("answerCallbackQuery", callback_query_id=callback_id, text=text)
@@ -260,6 +347,49 @@ def unique_titles(*groups: list[str]) -> list[str]:
                 seen.add(title.casefold())
                 results.append(title)
     return results
+
+
+def caption_tags(caption: str) -> list[str]:
+    """Import simple hashtags from an attached caption as movie tags."""
+    tags = []
+    for tag in re.findall(r"(?<!\w)#([\w-]{1,30})", caption):
+        clean = tag.replace("_", " ").strip()
+        if clean and clean.casefold() not in {item.casefold() for item in tags}:
+            tags.append(clean)
+    return tags[:8]
+
+
+def movie_label(movie: dict) -> str:
+    label = movie["title"] + (f" ({movie['year']})" if movie.get("year") else "")
+    if movie.get("tags"):
+        label += " — " + ", ".join(f"#{tag.replace(' ', '_')}" for tag in movie["tags"])
+    return label
+
+
+def tmdb_matches(title: str) -> list[dict]:
+    """Search TMDb and return a short, user-selectable list of movie matches."""
+    api_key = os.getenv("TMDB_API_KEY")
+    if not api_key:
+        return []
+    query = urllib.parse.urlencode({"query": title, "include_adult": "false", "language": "en-US"})
+    request = urllib.request.Request(
+        f"https://api.themoviedb.org/3/search/movie?{query}",
+        headers={"Authorization": f"Bearer {api_key}", "accept": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            results = json.loads(response.read()).get("results", [])
+        matches = []
+        for result in results[:5]:
+            name = result.get("title") or result.get("original_title")
+            if not name:
+                continue
+            date = result.get("release_date") or ""
+            matches.append({"title": name, "year": int(date[:4]) if date[:4].isdigit() else None, "tmdb_id": result.get("id")})
+        return matches
+    except Exception:
+        LOG.exception("TMDb search failed for %r; saving without a TMDb match", title)
+        return []
 
 
 def ocr(path: str) -> str:
@@ -437,14 +567,18 @@ def list_text(store: Store, chat_id: int, seen: bool | None = None) -> str:
     if not rows:
         return "No movies here yet. Send me a screenshot to add one."
     heading = "Your movies" if seen is None else ("Movies seen" if seen else "Movies not seen")
-    return heading + ":\n" + "\n".join(f"{i}. {title}" + (f" — rated {rating}/10" if rating else "") for i, (title, rating) in enumerate(rows, 1))
+    return heading + ":\n" + "\n".join(
+        f"{i}. {movie_label(row)}" + (f" — rated {row['rating']}/10" if row["rating"] else "")
+        for i, row in enumerate(rows, 1)
+    )
 
 
 def provider_status_text() -> str:
     return ("Vision providers configured:\n"
             f"Gemini: {'yes' if os.getenv('GEMINI_API_KEY') else 'no'}\n"
             f"Grok: {'yes' if os.getenv('XAI_API_KEY') else 'no'}\n"
-            f"OpenAI: {'yes' if os.getenv('OPENAI_API_KEY') else 'no'}")
+            f"OpenAI: {'yes' if os.getenv('OPENAI_API_KEY') else 'no'}\n"
+            f"TMDb matching: {'yes' if os.getenv('TMDB_API_KEY') else 'no'}")
 
 
 def help_text() -> str:
@@ -452,6 +586,7 @@ def help_text() -> str:
             "/list — all movies\n/seen — movies you have seen\n/unseen — movies you have not seen\n"
             "/seen <number> — mark a movie seen\n/unseen <number> — mark it not seen\n"
             "/rate <number> <1-10> — rate and mark seen\n/status — check vision providers\n"
+            "/tag <number> <tag> — add a tag to a movie\n"
             "/clear — clear your list\n/menu — show these buttons")
 
 
@@ -481,14 +616,68 @@ def handle_callback(bot: Telegram, store: Store, callback: dict) -> None:
             bot.send_menu(chat_id, help_text())
         bot.answer_callback(callback["id"], "Done")
         return
-    titles = store.take_pending(chat_id, token)
-    if not titles:
+    if action == "cancel":
+        store.discard_pending(chat_id, token)
+        bot.answer_callback(callback["id"], "Cancelled.")
+        return
+    if action == "toggle":
+        if not rest or not rest[0].isdigit():
+            bot.answer_callback(callback["id"], "Invalid choice.")
+            return
+        pending = store.toggle_pending(chat_id, token, int(rest[0]))
+        if not pending:
+            bot.answer_callback(callback["id"], "That choice has expired.")
+            return
+        bot.edit_choices(chat_id, message.get("message_id"), token, pending)
+        bot.answer_callback(callback["id"], "Selection updated.")
+        return
+    preview = store.pending_data(chat_id, token)
+    if action == "confirm" and preview is not None and not preview["selected"]:
+        bot.answer_callback(callback["id"], "Select at least one first.")
+        return
+    pending = store.take_pending(chat_id, token, selected_only=action != "all")
+    if not pending:
         bot.answer_callback(callback["id"], "That choice has expired.")
         return
-    chosen = titles if action == "pickall" else ([titles[int(rest[0])] ] if rest and int(rest[0]) < len(titles) else [])
+    chosen = pending["items"]
+    if pending["kind"] == "title":
+        matches = []
+        for item in chosen:
+            found = tmdb_matches(item["title"])
+            matches.extend(found or [{"title": item["title"]}])
+        for match in matches:
+            match["tags"] = pending["tags"]
+        if len(matches) > 1:
+            next_token = store.pending(chat_id, matches[:12], "movie", pending["tags"])
+            bot.send_choices(chat_id, next_token, store.pending_data(chat_id, next_token))
+            bot.answer_callback(callback["id"], "Now choose the matching movie versions.")
+            return
+        chosen = matches
+    else:
+        for movie in chosen:
+            movie["tags"] = pending["tags"]
     added = store.add(chat_id, chosen)
     bot.answer_callback(callback["id"], "Added to your list." if added else "Already on your list.")
     bot.send(chat_id, "Added:\n" + "\n".join(f"• {title}" for title in added) if added else "Those movies were already on your list.")
+
+
+def save_or_choose_tmdb(bot: Telegram, store: Store, chat_id: int, titles: list[str], tags: list[str]) -> None:
+    """Save an unambiguous result, otherwise ask the user to choose a TMDb match."""
+    matches = []
+    for title in titles:
+        found = tmdb_matches(title)
+        matches.extend(found or [{"title": title}])
+    for match in matches:
+        match["tags"] = tags
+    if len(matches) > 1:
+        token = store.pending(chat_id, matches[:12], "movie", tags)
+        bot.send_choices(chat_id, token, store.pending_data(chat_id, token))
+        return
+    added = store.add(chat_id, matches)
+    if added:
+        bot.send(chat_id, "Added:\n" + "\n".join(f"• {title}" for title in added) + f"\n\nYou have {store.count(chat_id)} movie(s). Use /seen <number> or /rate <number> <1-10> when you watch it.")
+    else:
+        bot.send(chat_id, "That movie is already on your list.")
 
 
 def handle(bot: Telegram, store: Store, message: dict) -> None:
@@ -519,6 +708,14 @@ def handle(bot: Telegram, store: Store, message: dict) -> None:
         title = store.rate(chat_id, int(parts[1]), int(parts[2]))
         bot.send(chat_id, f"Rated “{title}” {parts[2]}/10 and marked it seen." if title else "I couldn’t find that movie number. Use /list first.")
         return
+    if command == "/tag" and len(parts) >= 3 and parts[1].isdigit():
+        tag = " ".join(parts[2:]).lstrip("#").strip()
+        if not tag:
+            bot.send(chat_id, "Use /tag <movie number> <tag>. Example: /tag 3 favorite")
+            return
+        title = store.tag(chat_id, int(parts[1]), tag)
+        bot.send(chat_id, f"Added #{tag.replace(' ', '_')} to “{title}”." if title else "I couldn’t find that movie number. Use /list first.")
+        return
     if command == "/clear":
         store.clear(chat_id)
         bot.send(chat_id, "Cleared your movie list.")
@@ -539,6 +736,7 @@ def handle(bot: Telegram, store: Store, message: dict) -> None:
         # because a creator's caption often contains the exact movie title.
         caption = message.get("caption", "")
         caption_titles = extract_titles(caption)
+        tags = caption_tags(caption)
         vision_configured = any(os.getenv(name) for name in ("GEMINI_API_KEY", "XAI_API_KEY", "OPENAI_API_KEY"))
         provider = "local OCR"
         if os.getenv("GEMINI_API_KEY"):
@@ -576,12 +774,11 @@ def handle(bot: Telegram, store: Store, message: dict) -> None:
             LOG.info("Using local OCR/caption candidates: %s", titles)
     if len(titles) > 1:
         titles = titles[:6]
-        token = store.pending(chat_id, titles)
-        bot.send_choices(chat_id, token, titles)
+        token = store.pending(chat_id, [{"title": title} for title in titles], "title", tags)
+        bot.send_choices(chat_id, token, store.pending_data(chat_id, token))
         return
-    added = store.add(chat_id, titles)
-    if added:
-        bot.send(chat_id, "Added:\n" + "\n".join(f"• {title}" for title in added) + f"\n\nYou have {store.count(chat_id)} movie(s). Use /seen <number> or /rate <number> <1-10> when you watch it.")
+    if titles:
+        save_or_choose_tmdb(bot, store, chat_id, titles, tags)
     else:
         bot.send(chat_id, "I couldn’t confidently identify a movie title. Add the title as a caption, or check /status and the Railway logs to confirm a vision provider is configured.")
 

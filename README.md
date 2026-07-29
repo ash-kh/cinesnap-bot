@@ -20,9 +20,11 @@ Send the bot screenshots containing movie names—even when the screenshot also 
 
 On macOS, this is enough to run the bot in a terminal. Keep that terminal open, or use a process manager for continuous uptime.
 
-The SQLite database is `movies.sqlite3` by default. Set `MOVIE_DB` to change its location. Images can be sent as Telegram photos or image documents. If several title-shaped lines are found, the bot asks which one to add (or lets you add all).
+The SQLite database is `movies.sqlite3` by default. Set `MOVIE_DB` to change its location. Images can be sent as Telegram photos or image documents. If several title-shaped lines are found, the bot lets you select any combination of them. Hashtags in an image caption are saved as tags; you can also use `/tag` later.
 
 For difficult screenshots, CineSnap uses vision providers in this order: Gemini, Grok, OpenAI, then local OCR. Add `GEMINI_API_KEY` to use Gemini first (the default model is `gemini-3.5-flash-lite`; override it with `GEMINI_MODEL`). If Gemini is unavailable or returns no title, it tries `XAI_API_KEY`, then `OPENAI_API_KEY`. Both Gemini and Grok support image input; their free tiers and usage limits vary by account and model.
+
+To save a verified release year, add a TMDb API **Read Access Token** as `TMDB_API_KEY`. CineSnap searches TMDb after title detection. When TMDb returns several plausible movies, it shows each title/year and lets the user choose which ones to save. Without this optional key, CineSnap still saves the detected title but cannot verify its year.
 
 Commands:
 
@@ -31,6 +33,7 @@ Commands:
 - `/unseen` — show movies not yet seen
 - `/seen 3` or `/unseen 3` — change the status of movie 3 from `/list`
 - `/rate 3 8` — rate movie 3 from 1–10 and mark it seen
+- `/tag 3 favorite` — add a tag to movie 3
 - `/clear` — remove all movies
 - `/status` — show which vision providers are configured (never shows keys)
 - `/menu` — show an interactive menu of common actions
